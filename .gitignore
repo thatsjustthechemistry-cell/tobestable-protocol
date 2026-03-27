@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+target/
+
+# Keypairs & secrets
+*.json
+!package.json
+!tsconfig.json
+.env
+.env.*
+
+# Build artifacts
+.anchor/
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
