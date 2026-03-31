@@ -1,7 +1,12 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program::invoke_signed;
+use anchor_lang::solana_program::instruction::{Instruction, AccountMeta};
 use anchor_spl::token;
 use anchor_spl::token::{MintTo, Token, Transfer};
 use anchor_spl::token_interface::{Mint, TokenAccount};
+
+// Metaplex Token Metadata Program: metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s
+pub static MPL_TOKEN_METADATA_ID: Pubkey = pubkey!("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 
 declare_id!("CWZGdSh1EGsR95CnkK8AkEgtFX63Z9FurafK7rTFWJ4s");
 
@@ -35,6 +40,67 @@ pub mod neco_token {
         mint_state.bump = ctx.bumps.mint_authority;
         mint_state.vault_bump = ctx.bumps.vault_authority;
         mint_state.lp_lock_bump = ctx.bumps.lp_lock_authority;
+        mint_state.last_price_numerator = 0;
+        mint_state.last_price_denominator = 1;
+        mint_state.total_minted = 0;
+
+        // Create token metadata via Metaplex CPI (manual instruction)
+        let name = "TOBESTABLE".to_string();
+        let symbol = "TOBE".to_string();
+        let uri = "https://tobestable.com/token-metadata.json".to_string();
+
+        // CreateMetadataAccountV3 instruction discriminator = 33
+        let mut data_buf: Vec<u8> = vec![33];
+        // Serialize DataV2: name, symbol, uri, seller_fee_basis_points, creators, collection, uses
+        // Borsh serialization: string = 4-byte len + bytes
+        data_buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        data_buf.extend_from_slice(name.as_bytes());
+        data_buf.extend_from_slice(&(symbol.len() as u32).to_le_bytes());
+        data_buf.extend_from_slice(symbol.as_bytes());
+        data_buf.extend_from_slice(&(uri.len() as u32).to_le_bytes());
+        data_buf.extend_from_slice(uri.as_bytes());
+        data_buf.extend_from_slice(&0u16.to_le_bytes()); // seller_fee_basis_points
+        data_buf.push(0); // creators: None
+        data_buf.push(0); // collection: None
+        data_buf.push(0); // uses: None
+        // is_mutable
+        data_buf.push(1); // true
+        // collection_details: None
+        data_buf.push(0);
+
+        let accounts = vec![
+            AccountMeta::new(ctx.accounts.metadata.key(), false),
+            AccountMeta::new_readonly(ctx.accounts.tobe_mint.key(), false),
+            AccountMeta::new_readonly(ctx.accounts.mint_authority.key(), true), // mint authority (signer via PDA)
+            AccountMeta::new(ctx.accounts.authority.key(), true), // payer
+            AccountMeta::new_readonly(ctx.accounts.mint_authority.key(), false), // update authority
+            AccountMeta::new_readonly(ctx.accounts.system_program.key(), false),
+            AccountMeta::new_readonly(ctx.accounts.rent.key(), false),
+        ];
+
+        let ix = Instruction {
+            program_id: MPL_TOKEN_METADATA_ID,
+            accounts,
+            data: data_buf,
+        };
+
+        let seeds = &[b"mint_authority".as_ref(), &[ctx.bumps.mint_authority]];
+        let signer_seeds = &[&seeds[..]];
+
+        invoke_signed(
+            &ix,
+            &[
+                ctx.accounts.metadata.to_account_info(),
+                ctx.accounts.tobe_mint.to_account_info(),
+                ctx.accounts.mint_authority.to_account_info(),
+                ctx.accounts.authority.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.rent.to_account_info(),
+                ctx.accounts.token_metadata_program.to_account_info(),
+            ],
+            signer_seeds,
+        )?;
+
         Ok(())
     }
 
@@ -134,6 +200,14 @@ pub mod neco_token {
         mint_state.vault_balance = mint_state
             .vault_balance
             .checked_add(vault_tokens)
+            .ok_or(TobeError::MathOverflow)?;
+
+        // Update on-chain price oracle: price = MINT_COST / minter_tokens (USDC per TOBE)
+        mint_state.last_price_numerator = MINT_COST;
+        mint_state.last_price_denominator = minter_tokens;
+        mint_state.total_minted = mint_state
+            .total_minted
+            .checked_add(total_tokens)
             .ok_or(TobeError::MathOverflow)?;
 
         msg!("Round {}: {} TOBE minted ({} to minter, {} to vault)",
@@ -332,6 +406,66 @@ pub mod neco_token {
         Ok(())
     }
 
+    /// Update token metadata (name, symbol, URI). Authority only.
+    /// Uses Metaplex UpdateMetadataAccountV2 (discriminator = 15).
+    pub fn update_metadata(
+        ctx: Context<UpdateMetadata>,
+        name: String,
+        symbol: String,
+        uri: String,
+    ) -> Result<()> {
+        // UpdateMetadataAccountV2 discriminator = 15
+        let mut data_buf: Vec<u8> = vec![15];
+
+        // Option<DataV2>: Some = 1
+        data_buf.push(1);
+        // Serialize DataV2
+        data_buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        data_buf.extend_from_slice(name.as_bytes());
+        data_buf.extend_from_slice(&(symbol.len() as u32).to_le_bytes());
+        data_buf.extend_from_slice(symbol.as_bytes());
+        data_buf.extend_from_slice(&(uri.len() as u32).to_le_bytes());
+        data_buf.extend_from_slice(uri.as_bytes());
+        data_buf.extend_from_slice(&0u16.to_le_bytes()); // seller_fee_basis_points
+        data_buf.push(0); // creators: None
+        data_buf.push(0); // collection: None
+        data_buf.push(0); // uses: None
+
+        // Option<Pubkey> new_update_authority: None (keep current)
+        data_buf.push(0);
+        // Option<bool> primary_sale_happened: None
+        data_buf.push(0);
+        // Option<bool> is_mutable: None (keep current)
+        data_buf.push(0);
+
+        let accounts = vec![
+            AccountMeta::new(ctx.accounts.metadata.key(), false),
+            AccountMeta::new_readonly(ctx.accounts.mint_authority.key(), true), // update authority (signer via PDA)
+        ];
+
+        let ix = Instruction {
+            program_id: MPL_TOKEN_METADATA_ID,
+            accounts,
+            data: data_buf,
+        };
+
+        let seeds = &[b"mint_authority".as_ref(), &[ctx.accounts.mint_state.bump]];
+        let signer_seeds = &[&seeds[..]];
+
+        invoke_signed(
+            &ix,
+            &[
+                ctx.accounts.metadata.to_account_info(),
+                ctx.accounts.mint_authority.to_account_info(),
+                ctx.accounts.token_metadata_program.to_account_info(),
+            ],
+            signer_seeds,
+        )?;
+
+        msg!("Metadata updated: {} ({}) - {}", name, symbol, uri);
+        Ok(())
+    }
+
     /// Withdraw LP tokens after the 2-year lock expires.
     pub fn unlock_lp(ctx: Context<UnlockLp>) -> Result<()> {
         let mint_state = &mut ctx.accounts.mint_state;
@@ -425,6 +559,23 @@ pub struct Initialize<'info> {
     /// CHECK: PDA LP lock authority (bump stored at init for later use)
     #[account(seeds = [b"lp_lock_authority"], bump)]
     pub lp_lock_authority: UncheckedAccount<'info>,
+
+    /// CHECK: Metaplex metadata account (PDA derived from mint)
+    #[account(
+        mut,
+        seeds = [
+            b"metadata",
+            MPL_TOKEN_METADATA_ID.as_ref(),
+            tobe_mint.key().as_ref(),
+        ],
+        bump,
+        seeds::program = MPL_TOKEN_METADATA_ID,
+    )]
+    pub metadata: UncheckedAccount<'info>,
+
+    /// CHECK: Metaplex Token Metadata Program
+    #[account(address = MPL_TOKEN_METADATA_ID)]
+    pub token_metadata_program: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -655,6 +806,36 @@ pub struct UnlockLp<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[derive(Accounts)]
+pub struct UpdateMetadata<'info> {
+    #[account(constraint = authority.key() == mint_state.authority @ TobeError::Unauthorized)]
+    pub authority: Signer<'info>,
+
+    #[account(seeds = [b"mint_state"], bump)]
+    pub mint_state: Account<'info, MintState>,
+
+    /// CHECK: PDA mint authority (also the update authority for metadata)
+    #[account(seeds = [b"mint_authority"], bump = mint_state.bump)]
+    pub mint_authority: UncheckedAccount<'info>,
+
+    /// CHECK: Metaplex metadata account
+    #[account(
+        mut,
+        seeds = [
+            b"metadata",
+            MPL_TOKEN_METADATA_ID.as_ref(),
+            mint_state.tobe_mint.as_ref(),
+        ],
+        bump,
+        seeds::program = MPL_TOKEN_METADATA_ID,
+    )]
+    pub metadata: UncheckedAccount<'info>,
+
+    /// CHECK: Metaplex Token Metadata Program
+    #[account(address = MPL_TOKEN_METADATA_ID)]
+    pub token_metadata_program: UncheckedAccount<'info>,
+}
+
 // ─── State ───
 
 #[account]
@@ -676,6 +857,9 @@ pub struct MintState {
     pub bump: u8,                   // 1
     pub vault_bump: u8,             // 1
     pub lp_lock_bump: u8,           // 1
+    pub last_price_numerator: u64,  // 8 — price = numerator / denominator (USDC per TOBE)
+    pub last_price_denominator: u64, // 8 — e.g. 1024000000 / 524288000000000 for round 1
+    pub total_minted: u64,          // 8 — cumulative tokens minted (raw, 9 decimals)
 }
 
 // ─── Errors ───

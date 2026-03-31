@@ -1,0 +1,35 @@
+{
+  "name": "tobestable-protocol",
+  "version": "1.0.0",
+  "description": "Anti-inflationary Solana SPL token with 1024 decreasing mint rounds.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thatsjustthechemistry-cell/tobestable-protocol.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/thatsjustthechemistry-cell/tobestable-protocol/issues"
+  },
+  "homepage": "https://github.com/thatsjustthechemistry-cell/tobestable-protocol#readme",
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "chai": "^6.2.2"
+  },
+  "devDependencies": {
+    "@types/chai": "^5.2.3",
+    "@types/mocha": "^10.0.10",
+    "ts-mocha": "^11.1.0",
+    "typescript": "^6.0.2"
+  }
+}

@@ -24,7 +24,9 @@ Anti-inflationary Solana SPL token with 1024 decreasing mint rounds.
 - 2-year LP token lock
 - Pause/unpause capability
 - 2-step authority transfer
-- 25/25 tests passing
+- On-chain price oracle (updated every mint)
+- Metaplex token metadata (create + update via CPI)
+- 27/27 tests passing
 
 ## Build
 

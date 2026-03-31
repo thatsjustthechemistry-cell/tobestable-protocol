@@ -15,8 +15,18 @@ neco_token = "CWZGdSh1EGsR95CnkK8AkEgtFX63Z9FurafK7rTFWJ4s"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "devnet"
+cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
+
+[test]
+startup_wait = 60000
+
+[test.validator]
+bind_address = "127.0.0.1"
+url = "https://api.mainnet-beta.solana.com"
+
+[[test.validator.clone]]
+address = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"

@@ -12,6 +12,10 @@ import {
 } from "@solana/spl-token";
 import { assert } from "chai";
 
+const TOKEN_METADATA_PROGRAM_ID = new anchor.web3.PublicKey(
+  "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+);
+
 // Helper: create a token mint using TOKEN_PROGRAM_ID explicitly
 async function createMintHelper(
   connection: anchor.web3.Connection,
@@ -164,6 +168,15 @@ describe("tobestable", () => {
   });
 
   it("initializes the TOBE token with vault + pool reserve", async () => {
+    const [metadataPda] = anchor.web3.PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("metadata"),
+        TOKEN_METADATA_PROGRAM_ID.toBuffer(),
+        tobeMint.publicKey.toBuffer(),
+      ],
+      TOKEN_METADATA_PROGRAM_ID
+    );
+
     const tx = await program.methods
       .initialize(treasuryUsdc, authority.publicKey,)
       .accounts({
@@ -176,6 +189,8 @@ describe("tobestable", () => {
         vaultTokenAccount: vaultTokenPda,
         poolUsdcReserve: poolUsdcReservePda,
         lpLockAuthority: lpLockAuthorityPda,
+        metadata: metadataPda,
+        tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
         rent: anchor.web3.SYSVAR_RENT_PUBKEY,
@@ -192,6 +207,9 @@ describe("tobestable", () => {
     assert.equal(state.poolSeeded, false);
     assert.equal(state.lpLocked, false);
     assert.equal(state.authority.toString(), authority.publicKey.toString());
+    assert.equal(state.lastPriceNumerator.toNumber(), 0);
+    assert.equal(state.lastPriceDenominator.toNumber(), 1);
+    assert.equal(state.totalMinted.toNumber(), 0);
   });
 
   it("mints round 1 — 50% minter, 50% vault, USDC split 512/512", async () => {
@@ -243,6 +261,11 @@ describe("tobestable", () => {
 
     const poolReserveAccount = await getAccount(provider.connection, poolUsdcReservePda);
     assert.equal(Number(poolReserveAccount.amount), HALF_MINT_COST);
+
+    // Verify on-chain price oracle
+    assert.equal(state.lastPriceNumerator.toNumber(), MINT_COST); // 1,024,000,000
+    assert.equal(state.lastPriceDenominator.toNumber(), expectedMinter); // 524,288,000,000,000
+    assert.equal(state.totalMinted.toNumber(), totalTokens);
   });
 
   it("mints round 2 — full USDC to treasury, fewer tokens", async () => {
@@ -933,6 +956,63 @@ describe("tobestable", () => {
     assert.equal(state.authority.toString(), newAuthKeypair.publicKey.toString());
     assert.equal(state.pendingAuthority.toString(), new anchor.web3.PublicKey(new Uint8Array(32)).toString());
     console.log("  ✓ Authority transferred");
+  });
+
+  it("updates token metadata", async () => {
+    const [metadataPda] = anchor.web3.PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("metadata"),
+        TOKEN_METADATA_PROGRAM_ID.toBuffer(),
+        tobeMint.publicKey.toBuffer(),
+      ],
+      TOKEN_METADATA_PROGRAM_ID
+    );
+
+    // Update metadata — called by new authority (after transfer)
+    await program.methods
+      .updateMetadata("TOBESTABLE V2", "TOBE", "https://tobestable.com/token-metadata-v2.json")
+      .accounts({
+        authority: newAuthKeypair.publicKey,
+        mintState: mintStatePda,
+        mintAuthority: mintAuthorityPda,
+        metadata: metadataPda,
+        tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
+      })
+      .signers([newAuthKeypair])
+      .rpc();
+
+    console.log("  ✓ Metadata updated successfully");
+  });
+
+  it("rejects metadata update from non-authority", async () => {
+    const [metadataPda] = anchor.web3.PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("metadata"),
+        TOKEN_METADATA_PROGRAM_ID.toBuffer(),
+        tobeMint.publicKey.toBuffer(),
+      ],
+      TOKEN_METADATA_PROGRAM_ID
+    );
+
+    try {
+      await program.methods
+        .updateMetadata("HACKED", "HACK", "https://evil.com")
+        .accounts({
+          authority: authority.publicKey,
+          mintState: mintStatePda,
+          mintAuthority: mintAuthorityPda,
+          metadata: metadataPda,
+          tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
+        })
+        .rpc();
+      assert.fail("Should have rejected");
+    } catch (err) {
+      assert.ok(
+        err.toString().includes("Unauthorized") || err.toString().includes("ConstraintRaw"),
+        `Expected Unauthorized, got: ${err.toString().slice(0, 200)}`
+      );
+      console.log("  ✓ Non-authority metadata update rejected");
+    }
   });
 
   it("old authority can no longer pause", async () => {
