@@ -20,7 +20,7 @@ use anchor_spl::token_interface::{Mint, TokenAccount};
 // Metaplex Token Metadata Program: metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s
 pub static MPL_TOKEN_METADATA_ID: Pubkey = pubkey!("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 
-declare_id!("DnMvWs2dDim57TLBcJp7FKkDUFw2KnLmJybzpbTZuc65");
+declare_id!("CWZGdSh1EGsR95CnkK8AkEgtFX63Z9FurafK7rTFWJ4s");
 
 const MINT_COST: u64 = 10_000_000_000; // 10 SOL in lamports (9 decimals)
 const MAX_ROUNDS: u64 = 1024;

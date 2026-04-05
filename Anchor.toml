@@ -6,16 +6,19 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-neco_token = "CWZGdSh1EGsR95CnkK8AkEgtFX63Z9FurafK7rTFWJ4s"
+neco_token = "DnMvWs2dDim57TLBcJp7FKkDUFw2KnLmJybzpbTZuc65"
 
 [programs.devnet]
-neco_token = "CWZGdSh1EGsR95CnkK8AkEgtFX63Z9FurafK7rTFWJ4s"
+neco_token = "DnMvWs2dDim57TLBcJp7FKkDUFw2KnLmJybzpbTZuc65"
+
+[programs.testnet]
+neco_token = "DnMvWs2dDim57TLBcJp7FKkDUFw2KnLmJybzpbTZuc65"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]

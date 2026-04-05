@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "programs/*"
+    "programs/neco_token"
 ]
 resolver = "2"
 
