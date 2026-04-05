@@ -83,33 +83,20 @@ describe("tobestable", () => {
   const program = anchor.workspace.necoToken as Program<NecoToken>;
 
   const authority = provider.wallet as anchor.Wallet;
-  let usdcMint: anchor.web3.PublicKey;
+  const treasury = anchor.web3.Keypair.generate();
   let tobeMint: anchor.web3.Keypair;
-  let treasuryUsdc: anchor.web3.PublicKey;
-  let minterUsdc: anchor.web3.PublicKey;
   let minterTobe: anchor.web3.PublicKey;
   let mintStatePda: anchor.web3.PublicKey;
   let mintAuthorityPda: anchor.web3.PublicKey;
   let vaultAuthorityPda: anchor.web3.PublicKey;
   let vaultTokenPda: anchor.web3.PublicKey;
-  let poolUsdcReservePda: anchor.web3.PublicKey;
   let lpLockAuthorityPda: anchor.web3.PublicKey;
   let lpLockVaultPda: anchor.web3.PublicKey;
 
-  const MINT_COST = 1_024_000_000; // $1024 USDC (6 decimals)
-  const HALF_MINT_COST = 512_000_000; // $512 USDC
+  const MINT_COST = 10_000_000_000; // 10 SOL in lamports
   const TOBE_DECIMALS = 1_000_000_000; // 9 decimals
 
   before(async () => {
-    // Create fake USDC mint (6 decimals) with TOKEN_PROGRAM_ID
-    usdcMint = await createMintHelper(
-      provider.connection,
-      (authority as any).payer,
-      authority.publicKey,
-      6
-    );
-
-    // TOBE mint keypair
     tobeMint = anchor.web3.Keypair.generate();
 
     // Derive PDAs
@@ -129,10 +116,6 @@ describe("tobestable", () => {
       [Buffer.from("vault_token")],
       program.programId
     );
-    [poolUsdcReservePda] = anchor.web3.PublicKey.findProgramAddressSync(
-      [Buffer.from("pool_usdc_reserve")],
-      program.programId
-    );
     [lpLockAuthorityPda] = anchor.web3.PublicKey.findProgramAddressSync(
       [Buffer.from("lp_lock_authority")],
       program.programId
@@ -142,32 +125,14 @@ describe("tobestable", () => {
       program.programId
     );
 
-    // Create treasury USDC account
-    treasuryUsdc = await createTokenAccountHelper(
-      provider.connection,
-      (authority as any).payer,
-      usdcMint,
-      authority.publicKey
-    );
-
-    // Create minter USDC account and fund with test USDC
-    minterUsdc = await createTokenAccountHelper(
-      provider.connection,
-      (authority as any).payer,
-      usdcMint,
-      authority.publicKey
-    );
-    await mintToHelper(
-      provider.connection,
-      (authority as any).payer,
-      usdcMint,
-      minterUsdc,
-      (authority as any).payer,
-      10_000_000_000 // 10,000 USDC
-    );
+    // Fund treasury so it exists as a SystemAccount
+    const sig = await provider.connection.requestAirdrop(treasury.publicKey, 1_000_000_000);
+    await provider.connection.confirmTransaction(sig);
   });
 
-  it("initializes the TOBE token with vault + pool reserve", async () => {
+  // ── 1. Initialize ──
+
+  it("initializes the TOBE token with vault", async () => {
     const [metadataPda] = anchor.web3.PublicKey.findProgramAddressSync(
       [
         Buffer.from("metadata"),
@@ -178,16 +143,14 @@ describe("tobestable", () => {
     );
 
     const tx = await program.methods
-      .initialize(treasuryUsdc, authority.publicKey,)
+      .initialize(treasury.publicKey, authority.publicKey)
       .accounts({
         authority: authority.publicKey,
         mintState: mintStatePda,
         tobeMint: tobeMint.publicKey,
-        usdcMint: usdcMint,
         mintAuthority: mintAuthorityPda,
         vaultAuthority: vaultAuthorityPda,
         vaultTokenAccount: vaultTokenPda,
-        poolUsdcReserve: poolUsdcReservePda,
         lpLockAuthority: lpLockAuthorityPda,
         metadata: metadataPda,
         tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
@@ -204,22 +167,24 @@ describe("tobestable", () => {
     assert.equal(state.currentRound.toNumber(), 0);
     assert.equal(state.vaultBalance.toNumber(), 0);
     assert.equal(state.totalVaultReleased.toNumber(), 0);
-    assert.equal(state.poolSeeded, false);
     assert.equal(state.lpLocked, false);
+    assert.equal(state.paused, false);
     assert.equal(state.authority.toString(), authority.publicKey.toString());
-    assert.equal(state.lastPriceNumerator.toNumber(), 0);
-    assert.equal(state.lastPriceDenominator.toNumber(), 1);
+    assert.equal(state.treasury.toString(), treasury.publicKey.toString());
     assert.equal(state.totalMinted.toNumber(), 0);
   });
 
-  it("mints round 1 — 50% minter, 50% vault, USDC split 512/512", async () => {
-    // Create minter TOBE account
+  // ── 2. Mint Round 1 ──
+
+  it("mints round 1 — 50% minter, 50% vault, 10 SOL to treasury", async () => {
     minterTobe = await createTokenAccountHelper(
       provider.connection,
       (authority as any).payer,
       tobeMint.publicKey,
       authority.publicKey
     );
+
+    const treasuryBefore = await provider.connection.getBalance(treasury.publicKey);
 
     const tx = await program.methods
       .mintTobe()
@@ -229,11 +194,10 @@ describe("tobestable", () => {
         tobeMint: tobeMint.publicKey,
         mintAuthority: mintAuthorityPda,
         vaultTokenAccount: vaultTokenPda,
-        poolUsdcReserve: poolUsdcReservePda,
-        minterUsdc: minterUsdc,
-        treasuryUsdc: treasuryUsdc,
+        treasury: treasury.publicKey,
         minterTobe: minterTobe,
         tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 
@@ -242,34 +206,28 @@ describe("tobestable", () => {
     const state = await program.account.mintState.fetch(mintStatePda);
     assert.equal(state.currentRound.toNumber(), 1);
 
-    // Round 1: 1024 * 1024 = 1,048,576 tokens total
+    // Round 1: 1024 * (1024+1-1) = 1024 * 1024 = 1,048,576 tokens total
     const totalTokens = 1024 * 1024 * TOBE_DECIMALS;
     const expectedMinter = Math.floor(totalTokens / 2);
     const expectedVault = totalTokens - expectedMinter;
 
-    // Check minter received 50%
     const minterAccount = await getAccount(provider.connection, minterTobe);
     assert.equal(Number(minterAccount.amount), expectedMinter);
 
-    // Check vault received 50%
     const vaultAccount = await getAccount(provider.connection, vaultTokenPda);
     assert.equal(Number(vaultAccount.amount), expectedVault);
 
-    // Check USDC split: 512 to treasury, 512 to pool reserve
-    const treasuryAccount = await getAccount(provider.connection, treasuryUsdc);
-    assert.equal(Number(treasuryAccount.amount), HALF_MINT_COST);
+    // 10 SOL went to treasury
+    const treasuryAfter = await provider.connection.getBalance(treasury.publicKey);
+    assert.equal(treasuryAfter - treasuryBefore, MINT_COST);
 
-    const poolReserveAccount = await getAccount(provider.connection, poolUsdcReservePda);
-    assert.equal(Number(poolReserveAccount.amount), HALF_MINT_COST);
-
-    // Verify on-chain price oracle
-    assert.equal(state.lastPriceNumerator.toNumber(), MINT_COST); // 1,024,000,000
-    assert.equal(state.lastPriceDenominator.toNumber(), expectedMinter); // 524,288,000,000,000
     assert.equal(state.totalMinted.toNumber(), totalTokens);
   });
 
-  it("mints round 2 — full USDC to treasury, fewer tokens", async () => {
-    const treasuryBefore = await getAccount(provider.connection, treasuryUsdc);
+  // ── 3. Mint Round 2 ──
+
+  it("mints round 2 — 10 SOL to treasury, fewer tokens", async () => {
+    const treasuryBefore = await provider.connection.getBalance(treasury.publicKey);
 
     const tx = await program.methods
       .mintTobe()
@@ -279,11 +237,10 @@ describe("tobestable", () => {
         tobeMint: tobeMint.publicKey,
         mintAuthority: mintAuthorityPda,
         vaultTokenAccount: vaultTokenPda,
-        poolUsdcReserve: poolUsdcReservePda,
-        minterUsdc: minterUsdc,
-        treasuryUsdc: treasuryUsdc,
+        treasury: treasury.publicKey,
         minterTobe: minterTobe,
         tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 
@@ -292,210 +249,11 @@ describe("tobestable", () => {
     const state = await program.account.mintState.fetch(mintStatePda);
     assert.equal(state.currentRound.toNumber(), 2);
 
-    // Round 2: full 1024 USDC to treasury (not split)
-    const treasuryAfter = await getAccount(provider.connection, treasuryUsdc);
-    assert.equal(
-      Number(treasuryAfter.amount) - Number(treasuryBefore.amount),
-      MINT_COST
-    );
-
-    // Pool reserve should still only have 512 from round 1
-    const poolReserve = await getAccount(provider.connection, poolUsdcReservePda);
-    assert.equal(Number(poolReserve.amount), HALF_MINT_COST);
+    const treasuryAfter = await provider.connection.getBalance(treasury.publicKey);
+    assert.equal(treasuryAfter - treasuryBefore, MINT_COST);
   });
 
-  it("seeds the pool — releases vault tokens + pool USDC", async () => {
-    // Create destination accounts (simulating Raydium pool accounts)
-    const poolTobeDestination = await createTokenAccountHelper(
-      provider.connection,
-      (authority as any).payer,
-      tobeMint.publicKey,
-      authority.publicKey // In real deployment, owned by Raydium
-    );
-    const poolUsdcDestination = await createTokenAccountHelper(
-      provider.connection,
-      (authority as any).payer,
-      usdcMint,
-      authority.publicKey
-    );
-
-    const stateBefore = await program.account.mintState.fetch(mintStatePda);
-    const vaultBefore = stateBefore.vaultBalance.toNumber();
-
-    const tx = await program.methods
-      .seedPool()
-      .accounts({
-        authority: authority.publicKey,
-        mintState: mintStatePda,
-        vaultAuthority: vaultAuthorityPda,
-        vaultTokenAccount: vaultTokenPda,
-        poolUsdcReserve: poolUsdcReservePda,
-        poolTobeDestination: poolTobeDestination,
-        poolUsdcDestination: poolUsdcDestination,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .rpc();
-
-    console.log("Seed pool tx:", tx);
-
-    const stateAfter = await program.account.mintState.fetch(mintStatePda);
-    assert.equal(stateAfter.poolSeeded, true);
-
-    // Round 1 vault amount = 1024 * 1024 * 10^9 / 2 = 524,288,000,000,000
-    const round1VaultTokens = 1024 * 1024 * TOBE_DECIMALS / 2;
-
-    // Vault balance should have decreased by round 1's vault portion
-    assert.equal(
-      stateAfter.vaultBalance.toNumber(),
-      vaultBefore - round1VaultTokens
-    );
-
-    // Pool TOBE destination should have received tokens
-    const poolTobeAccount = await getAccount(provider.connection, poolTobeDestination);
-    assert.equal(Number(poolTobeAccount.amount), round1VaultTokens);
-
-    // Pool USDC destination should have received 512 USDC
-    const poolUsdcAccount = await getAccount(provider.connection, poolUsdcDestination);
-    assert.equal(Number(poolUsdcAccount.amount), HALF_MINT_COST);
-  });
-
-  it("rejects second seed_pool call", async () => {
-    const fakeTobeDest = await createTokenAccountHelper(
-      provider.connection,
-      (authority as any).payer,
-      tobeMint.publicKey,
-      authority.publicKey
-    );
-    const fakeUsdcDest = await createTokenAccountHelper(
-      provider.connection,
-      (authority as any).payer,
-      usdcMint,
-      authority.publicKey
-    );
-
-    try {
-      await program.methods
-        .seedPool()
-        .accounts({
-          authority: authority.publicKey,
-          mintState: mintStatePda,
-          vaultAuthority: vaultAuthorityPda,
-          vaultTokenAccount: vaultTokenPda,
-          poolUsdcReserve: poolUsdcReservePda,
-          poolTobeDestination: fakeTobeDest,
-          poolUsdcDestination: fakeUsdcDest,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .rpc();
-      assert.fail("Should have rejected second seed_pool");
-    } catch (err) {
-      assert.include(err.toString(), "PoolAlreadySeeded");
-    }
-  });
-
-  it("vault releases TOBE at $1 when keeper triggers", async () => {
-    const stateBefore = await program.account.mintState.fetch(mintStatePda);
-    const vaultBefore = stateBefore.vaultBalance.toNumber();
-
-    // Release 1000 TOBE from vault
-    const releaseAmount = 1000 * TOBE_DECIMALS;
-    const expectedUsdcCost = 1000 * 1_000_000; // 1000 * $1
-
-    const buyerTobeBefore = await getAccount(provider.connection, minterTobe);
-    const treasuryBefore = await getAccount(provider.connection, treasuryUsdc);
-
-    const tx = await program.methods
-      .vaultRelease(new anchor.BN(releaseAmount))
-      .accounts({
-        buyer: authority.publicKey,
-        keeper: authority.publicKey,
-        mintState: mintStatePda,
-        vaultAuthority: vaultAuthorityPda,
-        vaultTokenAccount: vaultTokenPda,
-        buyerUsdc: minterUsdc,
-        treasuryUsdc: treasuryUsdc,
-        buyerTobe: minterTobe,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .rpc();
-
-    console.log("Vault release tx:", tx);
-
-    const stateAfter = await program.account.mintState.fetch(mintStatePda);
-    assert.equal(stateAfter.vaultBalance.toNumber(), vaultBefore - releaseAmount);
-    assert.equal(stateAfter.totalVaultReleased.toNumber(), releaseAmount);
-
-    const buyerTobeAfter = await getAccount(provider.connection, minterTobe);
-    assert.equal(
-      Number(buyerTobeAfter.amount) - Number(buyerTobeBefore.amount),
-      releaseAmount
-    );
-
-    const treasuryAfter = await getAccount(provider.connection, treasuryUsdc);
-    assert.equal(
-      Number(treasuryAfter.amount) - Number(treasuryBefore.amount),
-      expectedUsdcCost
-    );
-  });
-
-  it("rejects vault release from non-keeper", async () => {
-    const fakeKeeper = anchor.web3.Keypair.generate();
-    const sig = await provider.connection.requestAirdrop(fakeKeeper.publicKey, 1_000_000_000);
-    await provider.connection.confirmTransaction(sig);
-
-    const fakeUsdc = await createTokenAccountHelper(
-      provider.connection, (authority as any).payer, usdcMint, fakeKeeper.publicKey
-    );
-    const fakeTobe = await createTokenAccountHelper(
-      provider.connection, (authority as any).payer, tobeMint.publicKey, fakeKeeper.publicKey
-    );
-
-    try {
-      await program.methods
-        .vaultRelease(new anchor.BN(1_000_000_000))
-        .accounts({
-          buyer: fakeKeeper.publicKey,
-          keeper: fakeKeeper.publicKey,
-          mintState: mintStatePda,
-          vaultAuthority: vaultAuthorityPda,
-          vaultTokenAccount: vaultTokenPda,
-          buyerUsdc: fakeUsdc,
-          treasuryUsdc: treasuryUsdc,
-          buyerTobe: fakeTobe,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .signers([fakeKeeper])
-        .rpc();
-      assert.fail("Should have rejected unauthorized keeper");
-    } catch (err) {
-      assert.include(err.toString(), "Unauthorized");
-    }
-  });
-
-  it("rejects vault release exceeding balance", async () => {
-    const state = await program.account.mintState.fetch(mintStatePda);
-    const overAmount = state.vaultBalance.toNumber() + 1_000_000_000;
-
-    try {
-      await program.methods
-        .vaultRelease(new anchor.BN(overAmount))
-        .accounts({
-          buyer: authority.publicKey,
-          keeper: authority.publicKey,
-          mintState: mintStatePda,
-          vaultAuthority: vaultAuthorityPda,
-          vaultTokenAccount: vaultTokenPda,
-          buyerUsdc: minterUsdc,
-          treasuryUsdc: treasuryUsdc,
-          buyerTobe: minterTobe,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .rpc();
-      assert.fail("Should have rejected excess vault release");
-    } catch (err) {
-      assert.include(err.toString(), "InsufficientVault");
-    }
-  });
+  // ── 4. Round 3 Decreasing Formula ──
 
   it("round 3 yields fewer tokens — verifies decreasing formula", async () => {
     const minterTobeBefore = await getAccount(provider.connection, minterTobe);
@@ -508,11 +266,10 @@ describe("tobestable", () => {
         tobeMint: tobeMint.publicKey,
         mintAuthority: mintAuthorityPda,
         vaultTokenAccount: vaultTokenPda,
-        poolUsdcReserve: poolUsdcReservePda,
-        minterUsdc: minterUsdc,
-        treasuryUsdc: treasuryUsdc,
+        treasury: treasury.publicKey,
         minterTobe: minterTobe,
         tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
 
@@ -520,7 +277,6 @@ describe("tobestable", () => {
     assert.equal(state.currentRound.toNumber(), 3);
 
     // Round 3: tokens = 1024 * (1024 + 1 - 3) = 1024 * 1022 = 1,046,528 total
-    // Minter gets 50% = 523,264 * 10^9
     const expectedTotal = 1024 * 1022 * TOBE_DECIMALS;
     const expectedMinter = Math.floor(expectedTotal / 2);
 
@@ -529,27 +285,13 @@ describe("tobestable", () => {
     assert.equal(received, expectedMinter);
   });
 
-  it("rejects mint when minter has insufficient USDC", async () => {
-    // Create a broke minter with only 1 USDC (needs 1024)
-    const brokeMinter = anchor.web3.Keypair.generate();
-    const sig = await provider.connection.requestAirdrop(brokeMinter.publicKey, 2_000_000_000);
-    await provider.connection.confirmTransaction(sig);
+  // ── 5. Insufficient SOL ──
 
-    const brokeUsdc = await createTokenAccountHelper(
-      provider.connection,
-      (authority as any).payer,
-      usdcMint,
-      brokeMinter.publicKey
-    );
-    // Fund with only 1 USDC (need 1024)
-    await mintToHelper(
-      provider.connection,
-      (authority as any).payer,
-      usdcMint,
-      brokeUsdc,
-      (authority as any).payer,
-      1_000_000 // 1 USDC
-    );
+  it("rejects mint when minter has insufficient SOL", async () => {
+    const brokeMinter = anchor.web3.Keypair.generate();
+    // Only 0.1 SOL — needs 10 SOL to mint
+    const sig = await provider.connection.requestAirdrop(brokeMinter.publicKey, 100_000_000);
+    await provider.connection.confirmTransaction(sig);
 
     const brokeTobe = await createTokenAccountHelper(
       provider.connection,
@@ -567,44 +309,276 @@ describe("tobestable", () => {
           tobeMint: tobeMint.publicKey,
           mintAuthority: mintAuthorityPda,
           vaultTokenAccount: vaultTokenPda,
-          poolUsdcReserve: poolUsdcReservePda,
-          minterUsdc: brokeUsdc,
-          treasuryUsdc: treasuryUsdc,
+          treasury: treasury.publicKey,
           minterTobe: brokeTobe,
           tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
         })
         .signers([brokeMinter])
         .rpc();
-      assert.fail("Should have rejected — minter only has 1 USDC");
+      assert.fail("Should have rejected — minter only has 0.1 SOL");
     } catch (err) {
-      // SPL token transfer fails with insufficient funds
       assert.ok(
         err.toString().includes("insufficient") ||
         err.toString().includes("0x1") ||
-        err.toString().includes("InsufficientFunds") ||
+        err.toString().includes("Transfer") ||
         err.toString().includes("Error"),
         `Expected insufficient funds error, got: ${err.toString().slice(0, 200)}`
       );
     }
 
-    // Verify round did NOT advance (transaction reverted atomically)
     const state = await program.account.mintState.fetch(mintStatePda);
     assert.equal(state.currentRound.toNumber(), 3, "Round should still be 3 — failed mint must not advance state");
   });
 
-  it("mints all remaining rounds through 1024, then rejects round 1025", async () => {
-    // Fund minter with enough USDC for remaining 1021 rounds (rounds 4-1024)
-    // 1021 * 1024 USDC = 1,045,504 USDC
-    await mintToHelper(
-      provider.connection,
-      (authority as any).payer,
-      usdcMint,
-      minterUsdc,
-      (authority as any).payer,
-      1_050_000_000_000 // 1,050,000 USDC — plenty of buffer
+  // ── 6. Vault Release ──
+
+  it("vault releases TOBE when keeper triggers — buyer pays SOL", async () => {
+    const stateBefore = await program.account.mintState.fetch(mintStatePda);
+    const vaultBefore = stateBefore.vaultBalance.toNumber();
+
+    // Release 1000 TOBE from vault, buyer pays 1 SOL
+    const releaseAmount = 1000 * TOBE_DECIMALS;
+    const solCost = 1_000_000_000; // 1 SOL
+
+    const buyerTobeBefore = await getAccount(provider.connection, minterTobe);
+    const treasuryBefore = await provider.connection.getBalance(treasury.publicKey);
+
+    const tx = await program.methods
+      .vaultRelease(new anchor.BN(releaseAmount), new anchor.BN(solCost))
+      .accounts({
+        buyer: authority.publicKey,
+        keeper: authority.publicKey,
+        mintState: mintStatePda,
+        vaultAuthority: vaultAuthorityPda,
+        vaultTokenAccount: vaultTokenPda,
+        treasury: treasury.publicKey,
+        buyerTobe: minterTobe,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .rpc();
+
+    console.log("Vault release tx:", tx);
+
+    const stateAfter = await program.account.mintState.fetch(mintStatePda);
+    assert.equal(stateAfter.vaultBalance.toNumber(), vaultBefore - releaseAmount);
+    assert.equal(stateAfter.totalVaultReleased.toNumber(), releaseAmount);
+
+    const buyerTobeAfter = await getAccount(provider.connection, minterTobe);
+    assert.equal(
+      Number(buyerTobeAfter.amount) - Number(buyerTobeBefore.amount),
+      releaseAmount
     );
 
-    // Mint rounds 4 through 1024
+    const treasuryAfter = await provider.connection.getBalance(treasury.publicKey);
+    assert.equal(treasuryAfter - treasuryBefore, solCost);
+  });
+
+  // ── 7. Unauthorized Keeper ──
+
+  it("rejects vault release from non-keeper", async () => {
+    const fakeKeeper = anchor.web3.Keypair.generate();
+    const sig = await provider.connection.requestAirdrop(fakeKeeper.publicKey, 2_000_000_000);
+    await provider.connection.confirmTransaction(sig);
+
+    const fakeTobe = await createTokenAccountHelper(
+      provider.connection, (authority as any).payer, tobeMint.publicKey, fakeKeeper.publicKey
+    );
+
+    try {
+      await program.methods
+        .vaultRelease(new anchor.BN(1_000_000_000), new anchor.BN(1_000_000_000))
+        .accounts({
+          buyer: fakeKeeper.publicKey,
+          keeper: fakeKeeper.publicKey,
+          mintState: mintStatePda,
+          vaultAuthority: vaultAuthorityPda,
+          vaultTokenAccount: vaultTokenPda,
+          treasury: treasury.publicKey,
+          buyerTobe: fakeTobe,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([fakeKeeper])
+        .rpc();
+      assert.fail("Should have rejected unauthorized keeper");
+    } catch (err) {
+      assert.include(err.toString(), "Unauthorized");
+    }
+  });
+
+  // ── 8. Vault Overrelease ──
+
+  it("rejects vault release exceeding balance", async () => {
+    const state = await program.account.mintState.fetch(mintStatePda);
+    const overAmount = state.vaultBalance.toNumber() + 1_000_000_000;
+
+    try {
+      await program.methods
+        .vaultRelease(new anchor.BN(overAmount), new anchor.BN(1_000_000_000))
+        .accounts({
+          buyer: authority.publicKey,
+          keeper: authority.publicKey,
+          mintState: mintStatePda,
+          vaultAuthority: vaultAuthorityPda,
+          vaultTokenAccount: vaultTokenPda,
+          treasury: treasury.publicKey,
+          buyerTobe: minterTobe,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .rpc();
+      assert.fail("Should have rejected excess vault release");
+    } catch (err) {
+      assert.include(err.toString(), "InsufficientVault");
+    }
+  });
+
+  // ── 9. Vault Release Zero Amount ──
+
+  it("rejects vault release with zero token amount", async () => {
+    try {
+      await program.methods
+        .vaultRelease(new anchor.BN(0), new anchor.BN(1_000_000_000))
+        .accounts({
+          buyer: authority.publicKey,
+          keeper: authority.publicKey,
+          mintState: mintStatePda,
+          vaultAuthority: vaultAuthorityPda,
+          vaultTokenAccount: vaultTokenPda,
+          treasury: treasury.publicKey,
+          buyerTobe: minterTobe,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .rpc();
+      assert.fail("Should have rejected zero token amount");
+    } catch (err) {
+      assert.include(err.toString(), "InvalidAmount");
+    }
+  });
+
+  // ── 10. Pause ──
+
+  it("pauses minting", async () => {
+    await program.methods
+      .pause()
+      .accounts({
+        authority: authority.publicKey,
+        mintState: mintStatePda,
+      })
+      .rpc();
+
+    const state = await program.account.mintState.fetch(mintStatePda);
+    assert.equal(state.paused, true);
+    console.log("  ✓ Minting paused");
+  });
+
+  // ── 11. Reject Mint While Paused ──
+
+  it("rejects mint while paused", async () => {
+    try {
+      await program.methods
+        .mintTobe()
+        .accounts({
+          minter: authority.publicKey,
+          mintState: mintStatePda,
+          tobeMint: tobeMint.publicKey,
+          mintAuthority: mintAuthorityPda,
+          vaultTokenAccount: vaultTokenPda,
+          treasury: treasury.publicKey,
+          minterTobe: minterTobe,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .rpc();
+      assert.fail("Should have rejected — minting is paused");
+    } catch (err) {
+      assert.include(err.toString(), "MintingPaused");
+      console.log("  ✓ Mint correctly rejected while paused");
+    }
+  });
+
+  // ── 12. Unauthorized Pause ──
+
+  it("rejects pause from non-authority", async () => {
+    const fake = anchor.web3.Keypair.generate();
+    const sig = await provider.connection.requestAirdrop(fake.publicKey, 1_000_000_000);
+    await provider.connection.confirmTransaction(sig);
+
+    try {
+      await program.methods
+        .pause()
+        .accounts({
+          authority: fake.publicKey,
+          mintState: mintStatePda,
+        })
+        .signers([fake])
+        .rpc();
+      assert.fail("Should have rejected");
+    } catch (err) {
+      assert.ok(
+        err.toString().includes("Unauthorized") || err.toString().includes("ConstraintRaw"),
+        `Expected Unauthorized, got: ${err.toString().slice(0, 200)}`
+      );
+    }
+  });
+
+  // ── 13. Double Pause ──
+
+  it("rejects double pause", async () => {
+    try {
+      await program.methods
+        .pause()
+        .accounts({
+          authority: authority.publicKey,
+          mintState: mintStatePda,
+        })
+        .rpc();
+      assert.fail("Should have rejected — already paused");
+    } catch (err) {
+      assert.include(err.toString(), "AlreadyPaused");
+      console.log("  ✓ Double pause correctly rejected");
+    }
+  });
+
+  // ── 14. Unpause ──
+
+  it("unpauses minting", async () => {
+    await program.methods
+      .unpause()
+      .accounts({
+        authority: authority.publicKey,
+        mintState: mintStatePda,
+      })
+      .rpc();
+
+    const state = await program.account.mintState.fetch(mintStatePda);
+    assert.equal(state.paused, false);
+    console.log("  ✓ Minting resumed");
+  });
+
+  // ── 15. Unpause When Not Paused ──
+
+  it("rejects unpause when not paused", async () => {
+    try {
+      await program.methods
+        .unpause()
+        .accounts({
+          authority: authority.publicKey,
+          mintState: mintStatePda,
+        })
+        .rpc();
+      assert.fail("Should have rejected");
+    } catch (err) {
+      assert.ok(err.toString().includes("NotPaused"));
+    }
+  });
+
+  // ── 16. All Remaining Rounds ──
+
+  it("mints all remaining rounds through 1024, then rejects round 1025", async () => {
     for (let r = 4; r <= 1024; r++) {
       await program.methods
         .mintTobe()
@@ -614,11 +588,10 @@ describe("tobestable", () => {
           tobeMint: tobeMint.publicKey,
           mintAuthority: mintAuthorityPda,
           vaultTokenAccount: vaultTokenPda,
-          poolUsdcReserve: poolUsdcReservePda,
-          minterUsdc: minterUsdc,
-          treasuryUsdc: treasuryUsdc,
+          treasury: treasury.publicKey,
           minterTobe: minterTobe,
           tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
         })
         .rpc();
 
@@ -630,10 +603,7 @@ describe("tobestable", () => {
     const state = await program.account.mintState.fetch(mintStatePda);
     assert.equal(state.currentRound.toNumber(), 1024);
 
-    // Verify round 1024 gave correct tokens: 1024 * (1024+1-1024) = 1024 * 1 = 1024 tokens
-    // This is the minimum — proves the curve bottoms out correctly
-
-    // Now try round 1025 — must be rejected
+    // Round 1025 must be rejected
     try {
       await program.methods
         .mintTobe()
@@ -643,11 +613,10 @@ describe("tobestable", () => {
           tobeMint: tobeMint.publicKey,
           mintAuthority: mintAuthorityPda,
           vaultTokenAccount: vaultTokenPda,
-          poolUsdcReserve: poolUsdcReservePda,
-          minterUsdc: minterUsdc,
-          treasuryUsdc: treasuryUsdc,
+          treasury: treasury.publicKey,
           minterTobe: minterTobe,
           tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
         })
         .rpc();
       assert.fail("Should have rejected round 1025");
@@ -656,6 +625,8 @@ describe("tobestable", () => {
       console.log("  ✓ Round 1025 correctly rejected with AllRoundsMinted");
     }
   });
+
+  // ── 17. Update Treasury ──
 
   it("updates treasury (authority only)", async () => {
     const newTreasury = anchor.web3.Keypair.generate().publicKey;
@@ -670,6 +641,8 @@ describe("tobestable", () => {
     const state = await program.account.mintState.fetch(mintStatePda);
     assert.equal(state.treasury.toString(), newTreasury.toString());
   });
+
+  // ── 18. Unauthorized Treasury Update ──
 
   it("rejects unauthorized treasury update", async () => {
     const fake = anchor.web3.Keypair.generate();
@@ -696,8 +669,9 @@ describe("tobestable", () => {
   let fakeLpMint: anchor.web3.PublicKey;
   let authorityLpAccount: anchor.web3.PublicKey;
 
+  // ── 19. Lock LP ──
+
   it("locks LP tokens for 2 years", async () => {
-    // Create a fake LP mint (simulating Raydium LP token)
     fakeLpMint = await createMintHelper(
       provider.connection,
       (authority as any).payer,
@@ -705,7 +679,6 @@ describe("tobestable", () => {
       6
     );
 
-    // Create authority's LP token account and mint some LP tokens
     authorityLpAccount = await createTokenAccountHelper(
       provider.connection,
       (authority as any).payer,
@@ -741,22 +714,21 @@ describe("tobestable", () => {
 
     console.log("Lock LP tx:", tx);
 
-    // Verify LP tokens moved to vault
     const lpBalanceAfter = await getAccount(provider.connection, authorityLpAccount);
     assert.equal(Number(lpBalanceAfter.amount), 0);
 
     const vaultBalance = await getAccount(provider.connection, lpLockVaultPda);
     assert.equal(Number(vaultBalance.amount), 1_000_000_000);
 
-    // Verify state
     const state = await program.account.mintState.fetch(mintStatePda);
     assert.equal(state.lpLocked, true);
     assert.equal(state.lpMint.toString(), fakeLpMint.toString());
     assert.ok(state.lpLockUntil.toNumber() > 0, "Lock expiry should be set");
   });
 
+  // ── 20. Reject Second Lock ──
+
   it("rejects second lock_lp call", async () => {
-    // Create another LP account with tokens
     const anotherLpAccount = await createTokenAccountHelper(
       provider.connection,
       (authority as any).payer,
@@ -797,6 +769,8 @@ describe("tobestable", () => {
     }
   });
 
+  // ── 21. Reject Early Unlock ──
+
   it("rejects unlock before 2 years", async () => {
     try {
       await program.methods
@@ -816,90 +790,15 @@ describe("tobestable", () => {
       console.log("  ✓ Correctly rejected early unlock with LpStillLocked");
     }
 
-    // Verify tokens are still locked
     const vaultBalance = await getAccount(provider.connection, lpLockVaultPda);
     assert.equal(Number(vaultBalance.amount), 1_000_000_000);
-  });
-
-  // ── Pause / Unpause Tests ──
-
-  it("pauses minting", async () => {
-    await program.methods
-      .pause()
-      .accounts({
-        authority: authority.publicKey,
-        mintState: mintStatePda,
-      })
-      .rpc();
-
-    const state = await program.account.mintState.fetch(mintStatePda);
-    assert.equal(state.paused, true);
-    console.log("  ✓ Minting paused");
-  });
-
-  it("rejects mint while paused (all rounds minted, but pause check comes first)", async () => {
-    // All 1024 rounds are already minted, but the pause check runs before the round check
-    // So we verify that the pause flag is set correctly in state
-    const state = await program.account.mintState.fetch(mintStatePda);
-    assert.equal(state.paused, true);
-    console.log("  ✓ Pause flag confirmed active in state");
-  });
-
-  it("rejects pause from non-authority", async () => {
-    const fake = anchor.web3.Keypair.generate();
-    const sig = await provider.connection.requestAirdrop(fake.publicKey, 1_000_000_000);
-    await provider.connection.confirmTransaction(sig);
-
-    try {
-      await program.methods
-        .pause()
-        .accounts({
-          authority: fake.publicKey,
-          mintState: mintStatePda,
-        })
-        .signers([fake])
-        .rpc();
-      assert.fail("Should have rejected");
-    } catch (err) {
-      assert.ok(
-        err.toString().includes("Unauthorized") || err.toString().includes("ConstraintRaw"),
-        `Expected Unauthorized, got: ${err.toString().slice(0, 200)}`
-      );
-    }
-  });
-
-  it("unpauses minting", async () => {
-    await program.methods
-      .unpause()
-      .accounts({
-        authority: authority.publicKey,
-        mintState: mintStatePda,
-      })
-      .rpc();
-
-    const state = await program.account.mintState.fetch(mintStatePda);
-    assert.equal(state.paused, false);
-    console.log("  ✓ Minting resumed");
-  });
-
-  it("rejects unpause when not paused", async () => {
-    try {
-      await program.methods
-        .unpause()
-        .accounts({
-          authority: authority.publicKey,
-          mintState: mintStatePda,
-        })
-        .rpc();
-      assert.fail("Should have rejected");
-    } catch (err) {
-      assert.ok(err.toString().includes("NotPaused"));
-    }
   });
 
   // ── 2-Step Authority Transfer Tests ──
 
   let newAuthKeypair: anchor.web3.Keypair;
+
+  // ── 22. Propose Authority ──
 
   it("proposes authority transfer", async () => {
     newAuthKeypair = anchor.web3.Keypair.generate();
@@ -918,6 +817,8 @@ describe("tobestable", () => {
     assert.equal(state.pendingAuthority.toString(), newAuthKeypair.publicKey.toString());
     console.log("  ✓ Authority transfer proposed");
   });
+
+  // ── 23. Reject Wrong Acceptor ──
 
   it("rejects accept from wrong key", async () => {
     const randomUser = anchor.web3.Keypair.generate();
@@ -942,6 +843,8 @@ describe("tobestable", () => {
     }
   });
 
+  // ── 24. Accept Authority ──
+
   it("new authority accepts transfer", async () => {
     await program.methods
       .acceptAuthority()
@@ -958,6 +861,8 @@ describe("tobestable", () => {
     console.log("  ✓ Authority transferred");
   });
 
+  // ── 25. Update Metadata ──
+
   it("updates token metadata", async () => {
     const [metadataPda] = anchor.web3.PublicKey.findProgramAddressSync(
       [
@@ -968,7 +873,6 @@ describe("tobestable", () => {
       TOKEN_METADATA_PROGRAM_ID
     );
 
-    // Update metadata — called by new authority (after transfer)
     await program.methods
       .updateMetadata("TOBESTABLE V2", "TOBE", "https://tobestable.com/token-metadata-v2.json")
       .accounts({
@@ -983,6 +887,8 @@ describe("tobestable", () => {
 
     console.log("  ✓ Metadata updated successfully");
   });
+
+  // ── 26. Reject Unauthorized Metadata ──
 
   it("rejects metadata update from non-authority", async () => {
     const [metadataPda] = anchor.web3.PublicKey.findProgramAddressSync(
@@ -1015,8 +921,9 @@ describe("tobestable", () => {
     }
   });
 
+  // ── 27. Old Authority Revoked ──
+
   it("old authority can no longer pause", async () => {
-    // State is unpaused after the unpause test. Just try to pause with old authority.
     try {
       await program.methods
         .pause()
