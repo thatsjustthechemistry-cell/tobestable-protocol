@@ -42,6 +42,7 @@ pub mod neco_token {
         mint_state.total_vault_released = 0;
         mint_state.lp_locked = false;
         mint_state.paused = false;
+        mint_state.pool_seeded = false;
         mint_state.pending_authority = Pubkey::default();
         mint_state.lp_mint = Pubkey::default();
         mint_state.lp_lock_until = 0;
@@ -129,17 +130,42 @@ pub mod neco_token {
         let minter_tokens = total_tokens / 2;
         let vault_tokens = total_tokens - minter_tokens;
 
-        // Transfer 10 SOL from minter to treasury (native SOL via system_program)
-        anchor_lang::system_program::transfer(
-            CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                anchor_lang::system_program::Transfer {
-                    from: ctx.accounts.minter.to_account_info(),
-                    to: ctx.accounts.treasury.to_account_info(),
-                },
-            ),
-            MINT_COST,
-        )?;
+        // Round 1: split 50/50 between treasury and pool SOL reserve
+        // All other rounds: full 10 SOL to treasury
+        if round == 1 {
+            let half_cost = MINT_COST / 2;
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: ctx.accounts.minter.to_account_info(),
+                        to: ctx.accounts.treasury.to_account_info(),
+                    },
+                ),
+                half_cost,
+            )?;
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: ctx.accounts.minter.to_account_info(),
+                        to: ctx.accounts.pool_sol_reserve.to_account_info(),
+                    },
+                ),
+                half_cost,
+            )?;
+        } else {
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: ctx.accounts.minter.to_account_info(),
+                        to: ctx.accounts.treasury.to_account_info(),
+                    },
+                ),
+                MINT_COST,
+            )?;
+        }
 
         // Mint 50% TOBE to the minter
         let seeds = &[b"mint_authority".as_ref(), &[mint_state.bump]];
@@ -234,6 +260,59 @@ pub mod neco_token {
             .ok_or(TobeError::MathOverflow)?;
 
         msg!("Vault released {} TOBE for {} lamports SOL", token_amount, sol_lamports);
+        Ok(())
+    }
+
+    /// Seed the initial Raydium pool. Releases round 1's vault TOBE + pool SOL reserve.
+    /// Authority calls this once after round 1 to create the TOBE/SOL pool.
+    pub fn seed_pool(ctx: Context<SeedPool>) -> Result<()> {
+        let mint_state = &mut ctx.accounts.mint_state;
+        require!(!mint_state.pool_seeded, TobeError::PoolAlreadySeeded);
+
+        // Round 1 vault tokens: 1024 * 1024 * 10^9 / 2 = 524,288,000,000,000
+        let round1_total = TOKENS_PER_UNIT
+            .checked_mul(MAX_ROUNDS)
+            .ok_or(TobeError::MathOverflow)?
+            .checked_mul(TOBE_DECIMALS_FACTOR)
+            .ok_or(TobeError::MathOverflow)?;
+        let round1_vault = round1_total / 2;
+
+        // Transfer TOBE from vault to pool destination
+        let vault_seeds = &[b"vault_authority".as_ref(), &[mint_state.vault_bump]];
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.vault_token_account.to_account_info(),
+                    to: ctx.accounts.pool_tobe_destination.to_account_info(),
+                    authority: ctx.accounts.vault_authority.to_account_info(),
+                },
+                &[vault_seeds],
+            ),
+            round1_vault,
+        )?;
+
+        // Transfer SOL from pool reserve PDA to authority
+        let sol_balance = ctx.accounts.pool_sol_reserve.lamports();
+        let pool_seeds = &[b"pool_sol_reserve".as_ref(), &[ctx.bumps.pool_sol_reserve]];
+        anchor_lang::system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.pool_sol_reserve.to_account_info(),
+                    to: ctx.accounts.authority.to_account_info(),
+                },
+                &[pool_seeds],
+            ),
+            sol_balance,
+        )?;
+
+        mint_state.vault_balance = mint_state.vault_balance
+            .checked_sub(round1_vault)
+            .ok_or(TobeError::MathOverflow)?;
+        mint_state.pool_seeded = true;
+
+        msg!("Pool seeded: {} TOBE + {} lamports SOL", round1_vault, sol_balance);
         Ok(())
     }
 
@@ -486,6 +565,10 @@ pub struct MintTobe<'info> {
     )]
     pub treasury: SystemAccount<'info>,
 
+    /// CHECK: PDA for pool SOL reserve (receives 50% on round 1)
+    #[account(mut, seeds = [b"pool_sol_reserve"], bump)]
+    pub pool_sol_reserve: UncheckedAccount<'info>,
+
     #[account(
         mut,
         constraint = minter_tobe.mint == tobe_mint.key(),
@@ -530,6 +613,32 @@ pub struct VaultRelease<'info> {
         constraint = buyer_tobe.owner == buyer.key()
     )]
     pub buyer_tobe: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SeedPool<'info> {
+    #[account(mut, constraint = authority.key() == mint_state.authority @ TobeError::Unauthorized)]
+    pub authority: Signer<'info>,
+
+    #[account(mut, seeds = [b"mint_state"], bump)]
+    pub mint_state: Account<'info, MintState>,
+
+    /// CHECK: PDA vault authority
+    #[account(seeds = [b"vault_authority"], bump = mint_state.vault_bump)]
+    pub vault_authority: UncheckedAccount<'info>,
+
+    #[account(mut, seeds = [b"vault_token"], bump)]
+    pub vault_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: PDA holding SOL for pool seeding
+    #[account(mut, seeds = [b"pool_sol_reserve"], bump)]
+    pub pool_sol_reserve: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub pool_tobe_destination: Box<InterfaceAccount<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -681,6 +790,7 @@ pub struct MintState {
     pub lp_lock_until: i64,          // 8
     pub lp_locked: bool,             // 1
     pub paused: bool,                // 1
+    pub pool_seeded: bool,           // 1
     pub bump: u8,                    // 1
     pub vault_bump: u8,              // 1
     pub lp_lock_bump: u8,            // 1
@@ -715,4 +825,6 @@ pub enum TobeError {
     NotPaused,
     #[msg("No pending authority transfer")]
     NoPendingAuthority,
+    #[msg("Pool has already been seeded")]
+    PoolAlreadySeeded,
 }

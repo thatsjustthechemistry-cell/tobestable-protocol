@@ -74,9 +74,10 @@ These must hold true at all times:
 
 ## Test Coverage
 
-27 tests covering:
+29 tests covering:
 - Initialization with metadata CPI
 - 3 individual mint rounds (token amounts, SOL transfers, decreasing formula)
+- Pool seeding (success, reject second call)
 - All 1024 rounds + round 1025 rejection
 - Insufficient SOL rejection
 - Vault release (success, unauthorized keeper, exceeding balance, zero amount)

@@ -92,6 +92,7 @@ describe("tobestable", () => {
   let vaultTokenPda: anchor.web3.PublicKey;
   let lpLockAuthorityPda: anchor.web3.PublicKey;
   let lpLockVaultPda: anchor.web3.PublicKey;
+  let poolSolReservePda: anchor.web3.PublicKey;
 
   const MINT_COST = 10_000_000_000; // 10 SOL in lamports
   const TOBE_DECIMALS = 1_000_000_000; // 9 decimals
@@ -122,6 +123,10 @@ describe("tobestable", () => {
     );
     [lpLockVaultPda] = anchor.web3.PublicKey.findProgramAddressSync(
       [Buffer.from("lp_lock_vault")],
+      program.programId
+    );
+    [poolSolReservePda] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("pool_sol_reserve")],
       program.programId
     );
 
@@ -169,6 +174,7 @@ describe("tobestable", () => {
     assert.equal(state.totalVaultReleased.toNumber(), 0);
     assert.equal(state.lpLocked, false);
     assert.equal(state.paused, false);
+    assert.equal(state.poolSeeded, false);
     assert.equal(state.authority.toString(), authority.publicKey.toString());
     assert.equal(state.treasury.toString(), treasury.publicKey.toString());
     assert.equal(state.totalMinted.toNumber(), 0);
@@ -176,7 +182,7 @@ describe("tobestable", () => {
 
   // ── 2. Mint Round 1 ──
 
-  it("mints round 1 — 50% minter, 50% vault, 10 SOL to treasury", async () => {
+  it("mints round 1 — 50% minter, 50% vault, 5 SOL treasury + 5 SOL pool reserve", async () => {
     minterTobe = await createTokenAccountHelper(
       provider.connection,
       (authority as any).payer,
@@ -195,6 +201,7 @@ describe("tobestable", () => {
         mintAuthority: mintAuthorityPda,
         vaultTokenAccount: vaultTokenPda,
         treasury: treasury.publicKey,
+        poolSolReserve: poolSolReservePda,
         minterTobe: minterTobe,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
@@ -217,9 +224,12 @@ describe("tobestable", () => {
     const vaultAccount = await getAccount(provider.connection, vaultTokenPda);
     assert.equal(Number(vaultAccount.amount), expectedVault);
 
-    // 10 SOL went to treasury
+    // Round 1: 5 SOL to treasury, 5 SOL to pool reserve
     const treasuryAfter = await provider.connection.getBalance(treasury.publicKey);
-    assert.equal(treasuryAfter - treasuryBefore, MINT_COST);
+    assert.equal(treasuryAfter - treasuryBefore, MINT_COST / 2);
+
+    const poolReserveBalance = await provider.connection.getBalance(poolSolReservePda);
+    assert.ok(poolReserveBalance >= MINT_COST / 2, "Pool reserve should have ≥5 SOL");
 
     assert.equal(state.totalMinted.toNumber(), totalTokens);
   });
@@ -238,6 +248,7 @@ describe("tobestable", () => {
         mintAuthority: mintAuthorityPda,
         vaultTokenAccount: vaultTokenPda,
         treasury: treasury.publicKey,
+        poolSolReserve: poolSolReservePda,
         minterTobe: minterTobe,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
@@ -267,6 +278,7 @@ describe("tobestable", () => {
         mintAuthority: mintAuthorityPda,
         vaultTokenAccount: vaultTokenPda,
         treasury: treasury.publicKey,
+        poolSolReserve: poolSolReservePda,
         minterTobe: minterTobe,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
@@ -285,7 +297,81 @@ describe("tobestable", () => {
     assert.equal(received, expectedMinter);
   });
 
-  // ── 5. Insufficient SOL ──
+  // ── 5. Seed Pool ──
+
+  it("seeds the pool — transfers vault TOBE + pool SOL to authority", async () => {
+    const stateBefore = await program.account.mintState.fetch(mintStatePda);
+    const vaultBalanceBefore = stateBefore.vaultBalance.toNumber();
+
+    // Round 1 vault amount: 1024 * 1024 * 10^9 / 2
+    const round1Vault = (1024 * 1024 * TOBE_DECIMALS) / 2;
+
+    const authorityBalBefore = await provider.connection.getBalance(authority.publicKey);
+    const minterTobeBefore = await getAccount(provider.connection, minterTobe);
+
+    const tx = await program.methods
+      .seedPool()
+      .accounts({
+        authority: authority.publicKey,
+        mintState: mintStatePda,
+        vaultAuthority: vaultAuthorityPda,
+        vaultTokenAccount: vaultTokenPda,
+        poolSolReserve: poolSolReservePda,
+        poolTobeDestination: minterTobe,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .rpc();
+
+    console.log("Seed pool tx:", tx);
+
+    const stateAfter = await program.account.mintState.fetch(mintStatePda);
+    assert.equal(stateAfter.poolSeeded, true);
+    assert.equal(stateAfter.vaultBalance.toNumber(), vaultBalanceBefore - round1Vault);
+
+    // Authority received SOL from pool reserve
+    const authorityBalAfter = await provider.connection.getBalance(authority.publicKey);
+    assert.ok(authorityBalAfter > authorityBalBefore, "Authority should have received pool SOL");
+
+    // Destination received TOBE from vault
+    const minterTobeAfter = await getAccount(provider.connection, minterTobe);
+    assert.equal(
+      Number(minterTobeAfter.amount) - Number(minterTobeBefore.amount),
+      round1Vault
+    );
+
+    // Pool reserve should be drained
+    const poolReserveAfter = await provider.connection.getBalance(poolSolReservePda);
+    assert.equal(poolReserveAfter, 0, "Pool reserve should be empty after seeding");
+
+    console.log("  ✓ Pool seeded successfully");
+  });
+
+  // ── 6. Reject Second Seed Pool ──
+
+  it("rejects second seed_pool call", async () => {
+    try {
+      await program.methods
+        .seedPool()
+        .accounts({
+          authority: authority.publicKey,
+          mintState: mintStatePda,
+          vaultAuthority: vaultAuthorityPda,
+          vaultTokenAccount: vaultTokenPda,
+          poolSolReserve: poolSolReservePda,
+          poolTobeDestination: minterTobe,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .rpc();
+      assert.fail("Should have rejected — pool already seeded");
+    } catch (err) {
+      assert.include(err.toString(), "PoolAlreadySeeded");
+      console.log("  ✓ Second seed_pool correctly rejected");
+    }
+  });
+
+  // ── 7. Insufficient SOL ──
 
   it("rejects mint when minter has insufficient SOL", async () => {
     const brokeMinter = anchor.web3.Keypair.generate();
@@ -310,6 +396,7 @@ describe("tobestable", () => {
           mintAuthority: mintAuthorityPda,
           vaultTokenAccount: vaultTokenPda,
           treasury: treasury.publicKey,
+          poolSolReserve: poolSolReservePda,
           minterTobe: brokeTobe,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: anchor.web3.SystemProgram.programId,
@@ -488,6 +575,7 @@ describe("tobestable", () => {
           mintAuthority: mintAuthorityPda,
           vaultTokenAccount: vaultTokenPda,
           treasury: treasury.publicKey,
+          poolSolReserve: poolSolReservePda,
           minterTobe: minterTobe,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: anchor.web3.SystemProgram.programId,
@@ -589,6 +677,7 @@ describe("tobestable", () => {
           mintAuthority: mintAuthorityPda,
           vaultTokenAccount: vaultTokenPda,
           treasury: treasury.publicKey,
+          poolSolReserve: poolSolReservePda,
           minterTobe: minterTobe,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: anchor.web3.SystemProgram.programId,
@@ -614,6 +703,7 @@ describe("tobestable", () => {
           mintAuthority: mintAuthorityPda,
           vaultTokenAccount: vaultTokenPda,
           treasury: treasury.publicKey,
+          poolSolReserve: poolSolReservePda,
           minterTobe: minterTobe,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: anchor.web3.SystemProgram.programId,
