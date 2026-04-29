@@ -93,6 +93,11 @@ describe("tobestable", () => {
   let lpLockAuthorityPda: anchor.web3.PublicKey;
   let lpLockVaultPda: anchor.web3.PublicKey;
   let poolSolReservePda: anchor.web3.PublicKey;
+  let vaultSolReservePda: anchor.web3.PublicKey;
+
+  // Placeholder Pyth feed pubkey for localnet (no real Pyth here).
+  // buy_from_vault / sell_to_vault tests must run on devnet.
+  const pythPlaceholder = anchor.web3.Keypair.generate().publicKey;
 
   const MINT_COST = 10_000_000_000; // 10 SOL in lamports
   const TOBE_DECIMALS = 1_000_000_000; // 9 decimals
@@ -129,6 +134,10 @@ describe("tobestable", () => {
       [Buffer.from("pool_sol_reserve")],
       program.programId
     );
+    [vaultSolReservePda] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("vault_sol_reserve")],
+      program.programId
+    );
 
     // Fund treasury so it exists as a SystemAccount
     const sig = await provider.connection.requestAirdrop(treasury.publicKey, 1_000_000_000);
@@ -148,7 +157,7 @@ describe("tobestable", () => {
     );
 
     const tx = await program.methods
-      .initialize(treasury.publicKey, authority.publicKey)
+      .initialize(treasury.publicKey, authority.publicKey, pythPlaceholder)
       .accounts({
         authority: authority.publicKey,
         mintState: mintStatePda,
@@ -182,15 +191,13 @@ describe("tobestable", () => {
 
   // ── 2. Mint Round 1 ──
 
-  it("mints round 1 — 50% minter, 50% vault, 5 SOL treasury + 5 SOL pool reserve", async () => {
+  it("mints round 1 — 50% minter, 50% vault, 5 SOL pool reserve + 5 SOL vault SOL reserve", async () => {
     minterTobe = await createTokenAccountHelper(
       provider.connection,
       (authority as any).payer,
       tobeMint.publicKey,
       authority.publicKey
     );
-
-    const treasuryBefore = await provider.connection.getBalance(treasury.publicKey);
 
     const tx = await program.methods
       .mintTobe()
@@ -200,8 +207,8 @@ describe("tobestable", () => {
         tobeMint: tobeMint.publicKey,
         mintAuthority: mintAuthorityPda,
         vaultTokenAccount: vaultTokenPda,
-        treasury: treasury.publicKey,
         poolSolReserve: poolSolReservePda,
+        vaultSolReserve: vaultSolReservePda,
         minterTobe: minterTobe,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
@@ -224,20 +231,22 @@ describe("tobestable", () => {
     const vaultAccount = await getAccount(provider.connection, vaultTokenPda);
     assert.equal(Number(vaultAccount.amount), expectedVault);
 
-    // Round 1: 5 SOL to treasury, 5 SOL to pool reserve
-    const treasuryAfter = await provider.connection.getBalance(treasury.publicKey);
-    assert.equal(treasuryAfter - treasuryBefore, MINT_COST / 2);
-
+    // 5 SOL to pool reserve, 5 SOL to vault SOL reserve, 0 to treasury
     const poolReserveBalance = await provider.connection.getBalance(poolSolReservePda);
     assert.ok(poolReserveBalance >= MINT_COST / 2, "Pool reserve should have ≥5 SOL");
 
+    const vaultSolBalance = await provider.connection.getBalance(vaultSolReservePda);
+    assert.ok(vaultSolBalance >= MINT_COST / 2, "Vault SOL reserve should have ≥5 SOL");
+
     assert.equal(state.totalMinted.toNumber(), totalTokens);
+    assert.equal(state.poolSolBalance.toNumber(), MINT_COST / 2);
   });
 
   // ── 3. Mint Round 2 ──
 
-  it("mints round 2 — 10 SOL to treasury, fewer tokens", async () => {
-    const treasuryBefore = await provider.connection.getBalance(treasury.publicKey);
+  it("mints round 2 — uniform 5/5 split, fewer tokens", async () => {
+    const poolBefore = await provider.connection.getBalance(poolSolReservePda);
+    const vaultSolBefore = await provider.connection.getBalance(vaultSolReservePda);
 
     const tx = await program.methods
       .mintTobe()
@@ -247,8 +256,8 @@ describe("tobestable", () => {
         tobeMint: tobeMint.publicKey,
         mintAuthority: mintAuthorityPda,
         vaultTokenAccount: vaultTokenPda,
-        treasury: treasury.publicKey,
         poolSolReserve: poolSolReservePda,
+        vaultSolReserve: vaultSolReservePda,
         minterTobe: minterTobe,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
@@ -260,8 +269,11 @@ describe("tobestable", () => {
     const state = await program.account.mintState.fetch(mintStatePda);
     assert.equal(state.currentRound.toNumber(), 2);
 
-    const treasuryAfter = await provider.connection.getBalance(treasury.publicKey);
-    assert.equal(treasuryAfter - treasuryBefore, MINT_COST);
+    // Round 2 also splits 5/5: pool reserve and vault SOL reserve each gain 5 SOL.
+    const poolAfter = await provider.connection.getBalance(poolSolReservePda);
+    const vaultSolAfter = await provider.connection.getBalance(vaultSolReservePda);
+    assert.equal(poolAfter - poolBefore, MINT_COST / 2);
+    assert.equal(vaultSolAfter - vaultSolBefore, MINT_COST / 2);
   });
 
   // ── 4. Round 3 Decreasing Formula ──
@@ -277,8 +289,8 @@ describe("tobestable", () => {
         tobeMint: tobeMint.publicKey,
         mintAuthority: mintAuthorityPda,
         vaultTokenAccount: vaultTokenPda,
-        treasury: treasury.publicKey,
         poolSolReserve: poolSolReservePda,
+        vaultSolReserve: vaultSolReservePda,
         minterTobe: minterTobe,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
@@ -395,8 +407,8 @@ describe("tobestable", () => {
           tobeMint: tobeMint.publicKey,
           mintAuthority: mintAuthorityPda,
           vaultTokenAccount: vaultTokenPda,
-          treasury: treasury.publicKey,
           poolSolReserve: poolSolReservePda,
+          vaultSolReserve: vaultSolReservePda,
           minterTobe: brokeTobe,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: anchor.web3.SystemProgram.programId,
@@ -418,132 +430,27 @@ describe("tobestable", () => {
     assert.equal(state.currentRound.toNumber(), 3, "Round should still be 3 — failed mint must not advance state");
   });
 
-  // ── 6. Vault Release ──
+  // ── 6. Stabilization (devnet only — needs real Pyth feed) ──
+  //
+  // The old keeper-driven `vaultRelease` was replaced by two permissionless
+  // instructions: `buyFromVault` (SOL → TOBE @ $1) and `sellToVault` (TOBE → SOL @ $1).
+  // Both read Pyth SOL/USD. Localnet has no Pyth, so these tests run on devnet.
 
-  it("vault releases TOBE when keeper triggers — buyer pays SOL", async () => {
-    const stateBefore = await program.account.mintState.fetch(mintStatePda);
-    const vaultBefore = stateBefore.vaultBalance.toNumber();
-
-    // Release 1000 TOBE from vault, buyer pays 1 SOL
-    const releaseAmount = 1000 * TOBE_DECIMALS;
-    const solCost = 1_000_000_000; // 1 SOL
-
-    const buyerTobeBefore = await getAccount(provider.connection, minterTobe);
-    const treasuryBefore = await provider.connection.getBalance(treasury.publicKey);
-
-    const tx = await program.methods
-      .vaultRelease(new anchor.BN(releaseAmount), new anchor.BN(solCost))
-      .accounts({
-        buyer: authority.publicKey,
-        keeper: authority.publicKey,
-        mintState: mintStatePda,
-        vaultAuthority: vaultAuthorityPda,
-        vaultTokenAccount: vaultTokenPda,
-        treasury: treasury.publicKey,
-        buyerTobe: minterTobe,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
-      })
-      .rpc();
-
-    console.log("Vault release tx:", tx);
-
-    const stateAfter = await program.account.mintState.fetch(mintStatePda);
-    assert.equal(stateAfter.vaultBalance.toNumber(), vaultBefore - releaseAmount);
-    assert.equal(stateAfter.totalVaultReleased.toNumber(), releaseAmount);
-
-    const buyerTobeAfter = await getAccount(provider.connection, minterTobe);
-    assert.equal(
-      Number(buyerTobeAfter.amount) - Number(buyerTobeBefore.amount),
-      releaseAmount
-    );
-
-    const treasuryAfter = await provider.connection.getBalance(treasury.publicKey);
-    assert.equal(treasuryAfter - treasuryBefore, solCost);
+  it.skip("buy_from_vault: caller pays SOL, receives TOBE at $1 (devnet)", async () => {
+    // Run on devnet with real Pyth SOL/USD feed pubkey passed at initialize.
+    // Expected: caller's TOBE balance += sol_in * sol_usd_price; treasury gains SOL.
   });
 
-  // ── 7. Unauthorized Keeper ──
-
-  it("rejects vault release from non-keeper", async () => {
-    const fakeKeeper = anchor.web3.Keypair.generate();
-    const sig = await provider.connection.requestAirdrop(fakeKeeper.publicKey, 2_000_000_000);
-    await provider.connection.confirmTransaction(sig);
-
-    const fakeTobe = await createTokenAccountHelper(
-      provider.connection, (authority as any).payer, tobeMint.publicKey, fakeKeeper.publicKey
-    );
-
-    try {
-      await program.methods
-        .vaultRelease(new anchor.BN(1_000_000_000), new anchor.BN(1_000_000_000))
-        .accounts({
-          buyer: fakeKeeper.publicKey,
-          keeper: fakeKeeper.publicKey,
-          mintState: mintStatePda,
-          vaultAuthority: vaultAuthorityPda,
-          vaultTokenAccount: vaultTokenPda,
-          treasury: treasury.publicKey,
-          buyerTobe: fakeTobe,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-        })
-        .signers([fakeKeeper])
-        .rpc();
-      assert.fail("Should have rejected unauthorized keeper");
-    } catch (err) {
-      assert.include(err.toString(), "Unauthorized");
-    }
+  it.skip("sell_to_vault: caller deposits TOBE, receives SOL at $1 from vault_sol_reserve (devnet)", async () => {
+    // Run on devnet. Expected: vault_sol_reserve drains by tobe_in / sol_usd_price.
   });
 
-  // ── 8. Vault Overrelease ──
-
-  it("rejects vault release exceeding balance", async () => {
-    const state = await program.account.mintState.fetch(mintStatePda);
-    const overAmount = state.vaultBalance.toNumber() + 1_000_000_000;
-
-    try {
-      await program.methods
-        .vaultRelease(new anchor.BN(overAmount), new anchor.BN(1_000_000_000))
-        .accounts({
-          buyer: authority.publicKey,
-          keeper: authority.publicKey,
-          mintState: mintStatePda,
-          vaultAuthority: vaultAuthorityPda,
-          vaultTokenAccount: vaultTokenPda,
-          treasury: treasury.publicKey,
-          buyerTobe: minterTobe,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-        })
-        .rpc();
-      assert.fail("Should have rejected excess vault release");
-    } catch (err) {
-      assert.include(err.toString(), "InsufficientVault");
-    }
+  it.skip("buy_from_vault rejects when oracle price is stale (devnet)", async () => {
+    // Stage a stale Pyth update; expect StalePriceFeed.
   });
 
-  // ── 9. Vault Release Zero Amount ──
-
-  it("rejects vault release with zero token amount", async () => {
-    try {
-      await program.methods
-        .vaultRelease(new anchor.BN(0), new anchor.BN(1_000_000_000))
-        .accounts({
-          buyer: authority.publicKey,
-          keeper: authority.publicKey,
-          mintState: mintStatePda,
-          vaultAuthority: vaultAuthorityPda,
-          vaultTokenAccount: vaultTokenPda,
-          treasury: treasury.publicKey,
-          buyerTobe: minterTobe,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-        })
-        .rpc();
-      assert.fail("Should have rejected zero token amount");
-    } catch (err) {
-      assert.include(err.toString(), "InvalidAmount");
-    }
+  it.skip("sell_to_vault rejects when vault_sol_reserve has insufficient SOL (devnet)", async () => {
+    // Drain vault_sol then attempt sell; expect VaultSolInsufficient.
   });
 
   // ── 10. Pause ──
@@ -574,8 +481,8 @@ describe("tobestable", () => {
           tobeMint: tobeMint.publicKey,
           mintAuthority: mintAuthorityPda,
           vaultTokenAccount: vaultTokenPda,
-          treasury: treasury.publicKey,
           poolSolReserve: poolSolReservePda,
+          vaultSolReserve: vaultSolReservePda,
           minterTobe: minterTobe,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: anchor.web3.SystemProgram.programId,
@@ -676,8 +583,8 @@ describe("tobestable", () => {
           tobeMint: tobeMint.publicKey,
           mintAuthority: mintAuthorityPda,
           vaultTokenAccount: vaultTokenPda,
-          treasury: treasury.publicKey,
           poolSolReserve: poolSolReservePda,
+          vaultSolReserve: vaultSolReservePda,
           minterTobe: minterTobe,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: anchor.web3.SystemProgram.programId,
@@ -702,8 +609,8 @@ describe("tobestable", () => {
           tobeMint: tobeMint.publicKey,
           mintAuthority: mintAuthorityPda,
           vaultTokenAccount: vaultTokenPda,
-          treasury: treasury.publicKey,
           poolSolReserve: poolSolReservePda,
+          vaultSolReserve: vaultSolReservePda,
           minterTobe: minterTobe,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: anchor.web3.SystemProgram.programId,

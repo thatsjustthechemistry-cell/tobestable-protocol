@@ -16,6 +16,7 @@ use anchor_lang::solana_program::instruction::{Instruction, AccountMeta};
 use anchor_spl::token;
 use anchor_spl::token::{MintTo, Token, Transfer};
 use anchor_spl::token_interface::{Mint, TokenAccount};
+use pyth_solana_receiver_sdk::price_update::{get_feed_id_from_hex, PriceUpdateV2};
 
 // Metaplex Token Metadata Program: metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s
 pub static MPL_TOKEN_METADATA_ID: Pubkey = pubkey!("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
@@ -28,14 +29,84 @@ const TOKENS_PER_UNIT: u64 = 1024;
 const TOBE_DECIMALS_FACTOR: u64 = 1_000_000_000; // 9 decimals
 const LP_LOCK_DURATION: i64 = 2 * 365 * 24 * 60 * 60; // 2 years in seconds
 
+// Pyth SOL/USD feed ID on mainnet (hex without 0x prefix).
+// See: https://pyth.network/developers/price-feed-ids
+const SOL_USD_FEED_ID_HEX: &str =
+    "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
+
+// Reject Pyth prices older than this many seconds.
+const PYTH_MAX_STALENESS_SECS: u64 = 60;
+// Reject Pyth prices where confidence interval > 1% of price.
+const PYTH_MAX_CONF_BPS: u128 = 100;
+
+// ─── Pyth helpers ───
+
+/// Read Pyth SOL/USD price, validate freshness and confidence.
+/// Returns (price_raw, exponent) where USD = price_raw * 10^exponent.
+fn read_sol_usd_price(price_update: &Account<PriceUpdateV2>) -> Result<(i64, i32)> {
+    let feed_id = get_feed_id_from_hex(SOL_USD_FEED_ID_HEX)
+        .map_err(|_| error!(TobeError::InvalidPriceFeed))?;
+    let price = price_update
+        .get_price_no_older_than(&Clock::get()?, PYTH_MAX_STALENESS_SECS, &feed_id)
+        .map_err(|_| error!(TobeError::StalePriceFeed))?;
+
+    require!(price.price > 0, TobeError::NonPositivePrice);
+
+    // conf / price <= PYTH_MAX_CONF_BPS / 10000
+    let conf_bps = (price.conf as u128)
+        .checked_mul(10_000)
+        .and_then(|v| v.checked_div(price.price as u128))
+        .ok_or(TobeError::MathOverflow)?;
+    require!(conf_bps <= PYTH_MAX_CONF_BPS, TobeError::PriceConfidenceTooWide);
+
+    Ok((price.price, price.exponent))
+}
+
+/// Convert lamports of SOL into TOBE (raw, 9 decimals) at $1/TOBE.
+/// Math: tobe_raw = lamports * sol_usd_price / 10^|exponent|
+/// Both lamports and TOBE have 9 decimals so unit conversion is preserved.
+fn lamports_to_tobe_at_one_usd(lamports: u64, sol_usd_price: i64, exponent: i32) -> Result<u64> {
+    require!(sol_usd_price > 0, TobeError::NonPositivePrice);
+    require!(exponent <= 0, TobeError::InvalidPriceFeed);
+    let abs_exp = (-exponent) as u32;
+    let scale = 10u128.checked_pow(abs_exp).ok_or(TobeError::MathOverflow)?;
+    let tobe = (lamports as u128)
+        .checked_mul(sol_usd_price as u128)
+        .ok_or(TobeError::MathOverflow)?
+        .checked_div(scale)
+        .ok_or(TobeError::MathOverflow)?;
+    u64::try_from(tobe).map_err(|_| error!(TobeError::MathOverflow))
+}
+
+/// Convert TOBE raw amount into lamports of SOL at $1/TOBE.
+/// Math: lamports = tobe_raw * 10^|exponent| / sol_usd_price
+fn tobe_to_lamports_at_one_usd(tobe_raw: u64, sol_usd_price: i64, exponent: i32) -> Result<u64> {
+    require!(sol_usd_price > 0, TobeError::NonPositivePrice);
+    require!(exponent <= 0, TobeError::InvalidPriceFeed);
+    let abs_exp = (-exponent) as u32;
+    let scale = 10u128.checked_pow(abs_exp).ok_or(TobeError::MathOverflow)?;
+    let lamports = (tobe_raw as u128)
+        .checked_mul(scale)
+        .ok_or(TobeError::MathOverflow)?
+        .checked_div(sol_usd_price as u128)
+        .ok_or(TobeError::MathOverflow)?;
+    u64::try_from(lamports).map_err(|_| error!(TobeError::MathOverflow))
+}
+
 #[program]
 pub mod neco_token {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>, treasury: Pubkey, admin_authority: Pubkey) -> Result<()> {
+    pub fn initialize(
+        ctx: Context<Initialize>,
+        treasury: Pubkey,
+        admin_authority: Pubkey,
+        pyth_sol_usd_feed: Pubkey,
+    ) -> Result<()> {
         let mint_state = &mut ctx.accounts.mint_state;
         mint_state.authority = admin_authority;
         mint_state.treasury = treasury;
+        mint_state.pyth_sol_usd_feed = pyth_sol_usd_feed;
         mint_state.current_round = 0;
         mint_state.tobe_mint = ctx.accounts.tobe_mint.key();
         mint_state.vault_balance = 0;
@@ -50,6 +121,7 @@ pub mod neco_token {
         mint_state.vault_bump = ctx.bumps.vault_authority;
         mint_state.lp_lock_bump = ctx.bumps.lp_lock_authority;
         mint_state.total_minted = 0;
+        mint_state.pool_sol_balance = 0;
 
         // Create token metadata via Metaplex CPI (manual instruction)
         let name = "TOBESTABLE".to_string();
@@ -130,42 +202,29 @@ pub mod neco_token {
         let minter_tokens = total_tokens / 2;
         let vault_tokens = total_tokens - minter_tokens;
 
-        // Round 1: split 50/50 between treasury and pool SOL reserve
-        // All other rounds: full 10 SOL to treasury
-        if round == 1 {
-            let half_cost = MINT_COST / 2;
-            anchor_lang::system_program::transfer(
-                CpiContext::new(
-                    ctx.accounts.system_program.to_account_info(),
-                    anchor_lang::system_program::Transfer {
-                        from: ctx.accounts.minter.to_account_info(),
-                        to: ctx.accounts.treasury.to_account_info(),
-                    },
-                ),
-                half_cost,
-            )?;
-            anchor_lang::system_program::transfer(
-                CpiContext::new(
-                    ctx.accounts.system_program.to_account_info(),
-                    anchor_lang::system_program::Transfer {
-                        from: ctx.accounts.minter.to_account_info(),
-                        to: ctx.accounts.pool_sol_reserve.to_account_info(),
-                    },
-                ),
-                half_cost,
-            )?;
-        } else {
-            anchor_lang::system_program::transfer(
-                CpiContext::new(
-                    ctx.accounts.system_program.to_account_info(),
-                    anchor_lang::system_program::Transfer {
-                        from: ctx.accounts.minter.to_account_info(),
-                        to: ctx.accounts.treasury.to_account_info(),
-                    },
-                ),
-                MINT_COST,
-            )?;
-        }
+        // Every round: 5 SOL → pool_sol_reserve (LP injection accumulator)
+        //              5 SOL → vault_sol_reserve (floor defense reserve)
+        let half_cost = MINT_COST / 2;
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.minter.to_account_info(),
+                    to: ctx.accounts.pool_sol_reserve.to_account_info(),
+                },
+            ),
+            half_cost,
+        )?;
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.minter.to_account_info(),
+                    to: ctx.accounts.vault_sol_reserve.to_account_info(),
+                },
+            ),
+            half_cost,
+        )?;
 
         // Mint 50% TOBE to the minter
         let seeds = &[b"mint_authority".as_ref(), &[mint_state.bump]];
@@ -204,26 +263,34 @@ pub mod neco_token {
             .total_minted
             .checked_add(total_tokens)
             .ok_or(TobeError::MathOverflow)?;
+        mint_state.pool_sol_balance = mint_state
+            .pool_sol_balance
+            .checked_add(half_cost)
+            .ok_or(TobeError::MathOverflow)?;
 
-        msg!("Round {}: {} TOBE minted ({} to minter, {} to vault)",
+        msg!("Round {}: {} TOBE minted ({} to minter, {} to vault); 5 SOL → pool, 5 SOL → vault_sol",
             round, token_units, minter_tokens, vault_tokens);
         Ok(())
     }
 
-    /// Keeper bot calls this when price > peg.
-    /// Buyer pays SOL, receives TOBE from vault. SOL goes to treasury.
-    /// Keeper (authority) specifies token_amount and the SOL cost (sol_lamports).
-    pub fn vault_release(ctx: Context<VaultRelease>, token_amount: u64, sol_lamports: u64) -> Result<()> {
-        let mint_state = &mut ctx.accounts.mint_state;
+    /// Permissionless: anyone can buy TOBE from the vault at $1/TOBE when Pyth says
+    /// SOL/USD is positive (i.e., always, since this caps the upside at $1).
+    /// Buyer sends `sol_in_lamports`, receives equivalent TOBE at $1 each.
+    /// All received SOL flows to the treasury (authority's wallet).
+    pub fn buy_from_vault(ctx: Context<BuyFromVault>, sol_in_lamports: u64) -> Result<()> {
+        require!(sol_in_lamports > 0, TobeError::ZeroAmount);
 
-        require!(token_amount > 0, TobeError::InvalidAmount);
-        require!(sol_lamports > 0, TobeError::InvalidAmount);
+        let (price, exponent) = read_sol_usd_price(&ctx.accounts.pyth_price_update)?;
+        let tobe_out = lamports_to_tobe_at_one_usd(sol_in_lamports, price, exponent)?;
+        require!(tobe_out > 0, TobeError::ZeroAmount);
+
+        let mint_state = &mut ctx.accounts.mint_state;
         require!(
-            token_amount <= mint_state.vault_balance,
+            tobe_out <= mint_state.vault_balance,
             TobeError::InsufficientVault
         );
 
-        // Buyer pays SOL to treasury
+        // 1. Buyer SOL → treasury (authority earns).
         anchor_lang::system_program::transfer(
             CpiContext::new(
                 ctx.accounts.system_program.to_account_info(),
@@ -232,10 +299,10 @@ pub mod neco_token {
                     to: ctx.accounts.treasury.to_account_info(),
                 },
             ),
-            sol_lamports,
+            sol_in_lamports,
         )?;
 
-        // Transfer TOBE from vault to buyer
+        // 2. Vault TOBE → buyer (vault PDA signs).
         let seeds = &[b"vault_authority".as_ref(), &[mint_state.vault_bump]];
         token::transfer(
             CpiContext::new_with_signer(
@@ -247,19 +314,72 @@ pub mod neco_token {
                 },
                 &[seeds],
             ),
-            token_amount,
+            tobe_out,
         )?;
 
         mint_state.vault_balance = mint_state
             .vault_balance
-            .checked_sub(token_amount)
+            .checked_sub(tobe_out)
             .ok_or(TobeError::MathOverflow)?;
         mint_state.total_vault_released = mint_state
             .total_vault_released
-            .checked_add(token_amount)
+            .checked_add(tobe_out)
             .ok_or(TobeError::MathOverflow)?;
 
-        msg!("Vault released {} TOBE for {} lamports SOL", token_amount, sol_lamports);
+        msg!(
+            "buy_from_vault: {} lamports → {} TOBE @ $1 (SOL/USD price={}, exp={})",
+            sol_in_lamports, tobe_out, price, exponent
+        );
+        Ok(())
+    }
+
+    /// Permissionless: anyone can sell TOBE to the vault at $1/TOBE.
+    /// Seller sends TOBE, receives SOL drawn from vault_sol_reserve at $1 each.
+    /// Bought TOBE returns to vault to replenish the upside-cap reserve.
+    pub fn sell_to_vault(ctx: Context<SellToVault>, tobe_in_raw: u64) -> Result<()> {
+        require!(tobe_in_raw > 0, TobeError::ZeroAmount);
+
+        let (price, exponent) = read_sol_usd_price(&ctx.accounts.pyth_price_update)?;
+        let sol_out = tobe_to_lamports_at_one_usd(tobe_in_raw, price, exponent)?;
+        require!(sol_out > 0, TobeError::ZeroAmount);
+
+        // 1. Seller TOBE → vault (replenish reserve).
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.seller_tobe.to_account_info(),
+                    to: ctx.accounts.vault_token_account.to_account_info(),
+                    authority: ctx.accounts.seller.to_account_info(),
+                },
+            ),
+            tobe_in_raw,
+        )?;
+
+        // 2. Vault SOL reserve → seller (direct lamport mutation; PDA holds SOL).
+        let vault_sol = &ctx.accounts.vault_sol_reserve;
+        let vault_sol_lamports = vault_sol.lamports();
+        require!(vault_sol_lamports >= sol_out, TobeError::VaultSolInsufficient);
+        **vault_sol.try_borrow_mut_lamports()? = vault_sol_lamports
+            .checked_sub(sol_out)
+            .ok_or(TobeError::VaultSolInsufficient)?;
+        **ctx.accounts.seller.try_borrow_mut_lamports()? = ctx
+            .accounts
+            .seller
+            .lamports()
+            .checked_add(sol_out)
+            .ok_or(TobeError::MathOverflow)?;
+
+        let mint_state = &mut ctx.accounts.mint_state;
+        mint_state.vault_balance = mint_state
+            .vault_balance
+            .checked_add(tobe_in_raw)
+            .ok_or(TobeError::MathOverflow)?;
+
+        msg!(
+            "sell_to_vault: {} TOBE → {} lamports @ $1 (SOL/USD price={}, exp={})",
+            tobe_in_raw, sol_out, price, exponent
+        );
         Ok(())
     }
 
@@ -558,16 +678,13 @@ pub struct MintTobe<'info> {
     #[account(mut, seeds = [b"vault_token"], bump)]
     pub vault_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// Treasury wallet that receives 10 SOL
-    #[account(
-        mut,
-        constraint = treasury.key() == mint_state.treasury @ TobeError::Unauthorized
-    )]
-    pub treasury: SystemAccount<'info>,
-
-    /// CHECK: PDA for pool SOL reserve (receives 50% on round 1)
+    /// CHECK: PDA for pool SOL reserve (receives 5 SOL/mint, accumulates for LP injection)
     #[account(mut, seeds = [b"pool_sol_reserve"], bump)]
     pub pool_sol_reserve: UncheckedAccount<'info>,
+
+    /// CHECK: PDA for vault SOL reserve (receives 5 SOL/mint, used by sell_to_vault floor defense)
+    #[account(mut, seeds = [b"vault_sol_reserve"], bump)]
+    pub vault_sol_reserve: UncheckedAccount<'info>,
 
     #[account(
         mut,
@@ -581,26 +698,21 @@ pub struct MintTobe<'info> {
 }
 
 #[derive(Accounts)]
-pub struct VaultRelease<'info> {
+pub struct BuyFromVault<'info> {
     #[account(mut)]
     pub buyer: Signer<'info>,
-
-    #[account(
-        constraint = keeper.key() == mint_state.authority @ TobeError::Unauthorized
-    )]
-    pub keeper: Signer<'info>,
 
     #[account(mut, seeds = [b"mint_state"], bump)]
     pub mint_state: Account<'info, MintState>,
 
-    /// CHECK: PDA vault authority
+    /// CHECK: PDA vault authority — signs the TOBE transfer out.
     #[account(seeds = [b"vault_authority"], bump = mint_state.vault_bump)]
     pub vault_authority: UncheckedAccount<'info>,
 
     #[account(mut, seeds = [b"vault_token"], bump)]
     pub vault_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// Treasury wallet that receives SOL from buyer
+    /// Treasury wallet — receives SOL from buyer (authority earns).
     #[account(
         mut,
         constraint = treasury.key() == mint_state.treasury @ TobeError::Unauthorized
@@ -613,6 +725,46 @@ pub struct VaultRelease<'info> {
         constraint = buyer_tobe.owner == buyer.key()
     )]
     pub buyer_tobe: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// Pyth SOL/USD price update account; must match the configured feed.
+    #[account(
+        constraint = pyth_price_update.key() == mint_state.pyth_sol_usd_feed
+            @ TobeError::InvalidPriceFeed
+    )]
+    pub pyth_price_update: Account<'info, PriceUpdateV2>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SellToVault<'info> {
+    #[account(mut)]
+    pub seller: Signer<'info>,
+
+    #[account(mut, seeds = [b"mint_state"], bump)]
+    pub mint_state: Account<'info, MintState>,
+
+    #[account(mut, seeds = [b"vault_token"], bump)]
+    pub vault_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: PDA holding floor-defense SOL (drained by sell_to_vault).
+    #[account(mut, seeds = [b"vault_sol_reserve"], bump)]
+    pub vault_sol_reserve: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        constraint = seller_tobe.mint == mint_state.tobe_mint,
+        constraint = seller_tobe.owner == seller.key()
+    )]
+    pub seller_tobe: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// Pyth SOL/USD price update account; must match the configured feed.
+    #[account(
+        constraint = pyth_price_update.key() == mint_state.pyth_sol_usd_feed
+            @ TobeError::InvalidPriceFeed
+    )]
+    pub pyth_price_update: Account<'info, PriceUpdateV2>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -784,6 +936,7 @@ pub struct MintState {
     pub treasury: Pubkey,            // 32
     pub tobe_mint: Pubkey,           // 32
     pub lp_mint: Pubkey,             // 32
+    pub pyth_sol_usd_feed: Pubkey,   // 32 — Pyth SOL/USD PriceUpdateV2 account
     pub current_round: u64,          // 8
     pub vault_balance: u64,          // 8
     pub total_vault_released: u64,   // 8
@@ -795,6 +948,7 @@ pub struct MintState {
     pub vault_bump: u8,              // 1
     pub lp_lock_bump: u8,            // 1
     pub total_minted: u64,           // 8
+    pub pool_sol_balance: u64,       // 8 — accumulated SOL pending LP injection
 }
 
 // ─── Errors ───
@@ -827,4 +981,53 @@ pub enum TobeError {
     NoPendingAuthority,
     #[msg("Pool has already been seeded")]
     PoolAlreadySeeded,
+    #[msg("Pyth price feed account does not match the configured feed")]
+    InvalidPriceFeed,
+    #[msg("Pyth price feed is stale")]
+    StalePriceFeed,
+    #[msg("Pyth confidence interval too wide")]
+    PriceConfidenceTooWide,
+    #[msg("Pyth price is non-positive")]
+    NonPositivePrice,
+    #[msg("Vault has insufficient SOL for this trade")]
+    VaultSolInsufficient,
+    #[msg("Pool SOL reserve has insufficient lamports for this trade")]
+    PoolSolInsufficient,
+    #[msg("Amount must be greater than zero")]
+    ZeroAmount,
+}
+
+#[cfg(test)]
+mod pyth_math_tests {
+    use super::{lamports_to_tobe_at_one_usd, tobe_to_lamports_at_one_usd};
+
+    #[test]
+    fn lamports_to_tobe_at_150_usd_per_sol() {
+        // 1 SOL (1e9 lamports) at $150/SOL → should yield 150 TOBE = 150 * 1e9 raw.
+        let tobe = lamports_to_tobe_at_one_usd(1_000_000_000, 15_000_000_000, -8).unwrap();
+        assert_eq!(tobe, 150_000_000_000);
+    }
+
+    #[test]
+    fn tobe_to_lamports_at_150_usd_per_sol() {
+        // 150 TOBE @ $1 = $150 = 1 SOL when SOL = $150.
+        let lamports = tobe_to_lamports_at_one_usd(150_000_000_000, 15_000_000_000, -8).unwrap();
+        assert_eq!(lamports, 1_000_000_000);
+    }
+
+    #[test]
+    fn round_trip_preserves_value() {
+        let original_lamports = 5_000_000_000u64; // 5 SOL
+        let sol_usd = 12_345_000_000i64; // $123.45
+        let tobe = lamports_to_tobe_at_one_usd(original_lamports, sol_usd, -8).unwrap();
+        let back = tobe_to_lamports_at_one_usd(tobe, sol_usd, -8).unwrap();
+        // Allow tiny rounding error.
+        assert!((original_lamports as i64 - back as i64).abs() <= 1);
+    }
+
+    #[test]
+    fn rejects_negative_price() {
+        assert!(lamports_to_tobe_at_one_usd(1_000_000_000, -1, -8).is_err());
+        assert!(tobe_to_lamports_at_one_usd(1_000_000_000, -1, -8).is_err());
+    }
 }
