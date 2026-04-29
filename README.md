@@ -54,7 +54,6 @@ Pyth `PriceUpdateV2` is validated on every call:
 - Mint payments split entirely between protocol PDAs (none to authority)
 - Permissionless $1 peg via Pyth oracle (no keeper bot needed)
 - Two-way peg defense (cap above, floor below)
-- 2-year LP token lock for trust signaling
 - Pause/unpause capability
 - 2-step authority transfer
 - Metaplex token metadata (create + update via CPI)
