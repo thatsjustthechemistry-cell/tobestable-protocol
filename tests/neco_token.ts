@@ -157,7 +157,7 @@ describe("tobestable", () => {
     );
 
     const tx = await program.methods
-      .initialize(treasury.publicKey, authority.publicKey, pythPlaceholder)
+      .initialize(treasury.publicKey, authority.publicKey)
       .accounts({
         authority: authority.publicKey,
         mintState: mintStatePda,
