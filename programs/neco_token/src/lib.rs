@@ -120,6 +120,13 @@ pub mod neco_token {
         mint_state.lp_lock_bump = ctx.bumps.lp_lock_authority;
         mint_state.total_minted = 0;
         mint_state.pool_sol_balance = 0;
+        mint_state.raydium_pool_state = Pubkey::default();
+        mint_state.raydium_pool_authority = Pubkey::default();
+        mint_state.raydium_lp_mint = Pubkey::default();
+        mint_state.raydium_token_0_vault = Pubkey::default();
+        mint_state.raydium_token_1_vault = Pubkey::default();
+        mint_state.tobe_is_token_0 = false;
+        mint_state.vault_tobe_at_config = 0;
 
         // Create token metadata via Metaplex CPI (manual instruction)
         let name = "TOBESTABLE".to_string();
@@ -434,8 +441,287 @@ pub mod neco_token {
         Ok(())
     }
 
+    // ─── Phase 2: Raydium auto-LP injection ───
+    //
+    // After authority creates the Raydium CPMM TOBE/wSOL pool externally
+    // (e.g., via scripts/create-raydium-pool.js using @raydium-io/raydium-sdk-v2),
+    // they call set_pool_config ONCE to record the pool addresses on-chain.
+    //
+    // Then anyone can call flush_lp_to_raydium when ≥1 SOL has accumulated in
+    // pool_sol_reserve. The instruction:
+    //   1. Pulls all pool_sol_reserve SOL → wraps to wSOL
+    //   2. Pulls matching TOBE from vault (proportional to current pool ratio)
+    //   3. CPI deposit into Raydium pool
+    //   4. Burns the LP token receipt (locks liquidity forever)
+    //
+    // Floor protection: never drain vault TOBE below 30% of vault_tobe_at_config.
+
+    pub fn set_pool_config(ctx: Context<SetPoolConfig>, tobe_is_token_0: bool) -> Result<()> {
+        let mint_state = &mut ctx.accounts.mint_state;
+        require!(
+            mint_state.raydium_pool_state == Pubkey::default(),
+            TobeError::PoolAlreadyConfigured
+        );
+
+        mint_state.raydium_pool_state = ctx.accounts.raydium_pool_state.key();
+        mint_state.raydium_pool_authority = ctx.accounts.raydium_pool_authority.key();
+        mint_state.raydium_lp_mint = ctx.accounts.raydium_lp_mint.key();
+        mint_state.raydium_token_0_vault = ctx.accounts.raydium_token_0_vault.key();
+        mint_state.raydium_token_1_vault = ctx.accounts.raydium_token_1_vault.key();
+        mint_state.tobe_is_token_0 = tobe_is_token_0;
+        mint_state.vault_tobe_at_config = mint_state.vault_balance;
+
+        msg!(
+            "Pool configured: pool={}, lp_mint={}, tobe_is_token_0={}, vault_baseline={}",
+            mint_state.raydium_pool_state,
+            mint_state.raydium_lp_mint,
+            tobe_is_token_0,
+            mint_state.vault_balance,
+        );
+        Ok(())
+    }
+
+    pub fn flush_lp_to_raydium(ctx: Context<FlushLpToRaydium>) -> Result<()> {
+        const FLUSH_MIN_LAMPORTS: u64 = 1_000_000_000; // 1 SOL
+        const VAULT_FLOOR_BPS: u128 = 3000; // 30%
+
+        let mint_state = &mut ctx.accounts.mint_state;
+
+        require!(
+            mint_state.raydium_pool_state != Pubkey::default(),
+            TobeError::PoolNotConfigured
+        );
+        require!(
+            mint_state.pool_sol_balance >= FLUSH_MIN_LAMPORTS,
+            TobeError::BelowFlushThreshold
+        );
+
+        let sol_to_deposit = mint_state.pool_sol_balance;
+
+        // Read pool reserves
+        let (pool_tobe_amount, pool_sol_amount) = if mint_state.tobe_is_token_0 {
+            (
+                ctx.accounts.raydium_token_0_vault.amount,
+                ctx.accounts.raydium_token_1_vault.amount,
+            )
+        } else {
+            (
+                ctx.accounts.raydium_token_1_vault.amount,
+                ctx.accounts.raydium_token_0_vault.amount,
+            )
+        };
+        require!(
+            pool_tobe_amount > 0 && pool_sol_amount > 0,
+            TobeError::EmptyPoolReserves
+        );
+
+        // tobe_to_pair = sol_to_deposit * pool_tobe / pool_sol  (rounded up by + 1)
+        let tobe_to_pair: u64 = (sol_to_deposit as u128)
+            .checked_mul(pool_tobe_amount as u128)
+            .ok_or(TobeError::MathOverflow)?
+            .checked_div(pool_sol_amount as u128)
+            .ok_or(TobeError::MathOverflow)?
+            .checked_add(1)
+            .ok_or(TobeError::MathOverflow)?
+            .try_into()
+            .map_err(|_| error!(TobeError::MathOverflow))?;
+
+        // Floor protection
+        let floor: u64 = ((mint_state.vault_tobe_at_config as u128)
+            .checked_mul(VAULT_FLOOR_BPS)
+            .and_then(|v| v.checked_div(10_000))
+            .ok_or(TobeError::MathOverflow)?) as u64;
+        let projected_vault = mint_state
+            .vault_balance
+            .checked_sub(tobe_to_pair)
+            .ok_or(TobeError::VaultFloorBreach)?;
+        require!(projected_vault >= floor, TobeError::VaultFloorBreach);
+
+        // Target LP tokens: sol_to_deposit / pool_sol * lp_supply
+        let pool_lp_supply = ctx.accounts.raydium_pool_state.load()?.lp_supply;
+        let target_lp: u64 = (sol_to_deposit as u128)
+            .checked_mul(pool_lp_supply as u128)
+            .ok_or(TobeError::MathOverflow)?
+            .checked_div(pool_sol_amount as u128)
+            .ok_or(TobeError::MathOverflow)?
+            .try_into()
+            .map_err(|_| error!(TobeError::MathOverflow))?;
+        require!(target_lp > 0, TobeError::LpAmountZero);
+
+        // 1. Move SOL from pool_sol_reserve PDA → wsol_temp via system program
+        //    (PDA-signed transfer; can't direct-mutate lamports since pool_sol_reserve
+        //    is owned by the system program, not by our program).
+        let pool_sol_seeds: &[&[u8]] = &[b"pool_sol_reserve", &[ctx.bumps.pool_sol_reserve]];
+        anchor_lang::system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.pool_sol_reserve.to_account_info(),
+                    to: ctx.accounts.wsol_temp.to_account_info(),
+                },
+                &[pool_sol_seeds],
+            ),
+            sol_to_deposit,
+        )?;
+
+        // 2. sync_native so wSOL token account reflects new lamport balance
+        let vault_authority_seeds: &[&[u8]] = &[b"vault_authority", &[mint_state.vault_bump]];
+        let vault_signer = &[vault_authority_seeds];
+        token::sync_native(CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            token::SyncNative {
+                account: ctx.accounts.wsol_temp.to_account_info(),
+            },
+            vault_signer,
+        ))?;
+
+        // 3. Determine token_0_account vs token_1_account based on ordering
+        let (token_0_account, token_1_account) = if mint_state.tobe_is_token_0 {
+            (
+                ctx.accounts.vault_token_account.to_account_info(),
+                ctx.accounts.wsol_temp.to_account_info(),
+            )
+        } else {
+            (
+                ctx.accounts.wsol_temp.to_account_info(),
+                ctx.accounts.vault_token_account.to_account_info(),
+            )
+        };
+        let max_tobe = mint_state.vault_balance;
+        let max_sol = sol_to_deposit;
+        let (max_token_0, max_token_1) = if mint_state.tobe_is_token_0 {
+            (max_tobe, max_sol)
+        } else {
+            (max_sol, max_tobe)
+        };
+
+        // 4. Raydium CPI deposit (vault_authority signs)
+        let cpi_accounts = raydium_cp_swap::cpi::accounts::Deposit {
+            owner: ctx.accounts.vault_authority.to_account_info(),
+            authority: ctx.accounts.raydium_pool_authority.to_account_info(),
+            pool_state: ctx.accounts.raydium_pool_state.to_account_info(),
+            owner_lp_token: ctx.accounts.lp_receipt.to_account_info(),
+            token_0_account,
+            token_1_account,
+            token_0_vault: ctx.accounts.raydium_token_0_vault.to_account_info(),
+            token_1_vault: ctx.accounts.raydium_token_1_vault.to_account_info(),
+            token_program: ctx.accounts.token_program.to_account_info(),
+            token_program_2022: ctx.accounts.token_program_2022.to_account_info(),
+            vault_0_mint: ctx.accounts.vault_0_mint.to_account_info(),
+            vault_1_mint: ctx.accounts.vault_1_mint.to_account_info(),
+            lp_mint: ctx.accounts.raydium_lp_mint.to_account_info(),
+        };
+        raydium_cp_swap::cpi::deposit(
+            CpiContext::new_with_signer(
+                ctx.accounts.raydium_program.to_account_info(),
+                cpi_accounts,
+                vault_signer,
+            ),
+            target_lp,
+            max_token_0,
+            max_token_1,
+        )?;
+
+        // 5. Burn the LP receipt (locks liquidity forever)
+        ctx.accounts.lp_receipt.reload()?;
+        let lp_received = ctx.accounts.lp_receipt.amount;
+        require!(lp_received > 0, TobeError::LpAmountZero);
+        token::burn(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                token::Burn {
+                    mint: ctx.accounts.raydium_lp_mint.to_account_info(),
+                    from: ctx.accounts.lp_receipt.to_account_info(),
+                    authority: ctx.accounts.vault_authority.to_account_info(),
+                },
+                vault_signer,
+            ),
+            lp_received,
+        )?;
+
+        // 6. Close wsol_temp, return rent to caller
+        token::close_account(CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            token::CloseAccount {
+                account: ctx.accounts.wsol_temp.to_account_info(),
+                destination: ctx.accounts.caller.to_account_info(),
+                authority: ctx.accounts.vault_authority.to_account_info(),
+            },
+            vault_signer,
+        ))?;
+
+        // 7. Update state
+        mint_state.pool_sol_balance = 0;
+        mint_state.vault_balance = mint_state
+            .vault_balance
+            .checked_sub(tobe_to_pair)
+            .ok_or(TobeError::MathOverflow)?;
+
+        msg!(
+            "Flush: deposited {} TOBE + {} lamports → {} LP burned",
+            tobe_to_pair,
+            sol_to_deposit,
+            lp_received,
+        );
+        Ok(())
+    }
+
     pub fn update_treasury(ctx: Context<UpdateTreasury>, new_treasury: Pubkey) -> Result<()> {
         ctx.accounts.mint_state.treasury = new_treasury;
+        Ok(())
+    }
+
+    /// One-time migration: reallocates the existing mint_state PDA to fit
+    /// new MintState fields (raydium pool config). New bytes are zero-init,
+    /// which is exactly the "unconfigured" default for Pubkey + u64 + bool.
+    /// Authority-only. Idempotent (no-op if already at new size).
+    pub fn migrate_state_v2(ctx: Context<MigrateStateV2>) -> Result<()> {
+        let mint_state = &ctx.accounts.mint_state;
+
+        // Manually validate authority by reading from raw data (UncheckedAccount).
+        let stored_authority = {
+            let data = mint_state.try_borrow_data()?;
+            require!(data.len() >= 40, TobeError::Unauthorized);
+            Pubkey::new_from_array(data[8..40].try_into().unwrap())
+        };
+        require_keys_eq!(
+            stored_authority,
+            ctx.accounts.authority.key(),
+            TobeError::Unauthorized
+        );
+
+        let new_size = 8usize + MintState::INIT_SPACE;
+        let current_size = mint_state.data_len();
+        if new_size <= current_size {
+            msg!("MintState already at v2 size ({} bytes); no-op", current_size);
+            return Ok(());
+        }
+
+        // Top up rent if needed
+        let rent = Rent::get()?;
+        let new_min_lamports = rent.minimum_balance(new_size);
+        let current_lamports = mint_state.lamports();
+        if new_min_lamports > current_lamports {
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: ctx.accounts.authority.to_account_info(),
+                        to: mint_state.to_account_info(),
+                    },
+                ),
+                new_min_lamports - current_lamports,
+            )?;
+        }
+
+        // Realloc with zero-init for new bytes
+        mint_state.to_account_info().realloc(new_size, true)?;
+
+        msg!(
+            "MintState reallocated: {} → {} bytes (Phase 2 fields zero-initialized)",
+            current_size,
+            new_size,
+        );
         Ok(())
     }
 
@@ -792,6 +1078,144 @@ pub struct SeedPool<'info> {
     pub system_program: Program<'info, System>,
 }
 
+// ─── Phase 2: Raydium account structs ───
+
+#[derive(Accounts)]
+pub struct SetPoolConfig<'info> {
+    #[account(
+        mut,
+        constraint = authority.key() == mint_state.authority @ TobeError::Unauthorized
+    )]
+    pub authority: Signer<'info>,
+
+    #[account(mut, seeds = [b"mint_state"], bump)]
+    pub mint_state: Account<'info, MintState>,
+
+    /// CHECK: pool ID; address recorded into state verbatim.
+    pub raydium_pool_state: UncheckedAccount<'info>,
+
+    /// CHECK: Raydium pool authority PDA; recorded into state.
+    pub raydium_pool_authority: UncheckedAccount<'info>,
+
+    /// CHECK: pool's LP mint; recorded into state.
+    pub raydium_lp_mint: UncheckedAccount<'info>,
+
+    /// CHECK: pool's token_0 vault; recorded into state.
+    pub raydium_token_0_vault: UncheckedAccount<'info>,
+
+    /// CHECK: pool's token_1 vault; recorded into state.
+    pub raydium_token_1_vault: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct FlushLpToRaydium<'info> {
+    #[account(mut)]
+    pub caller: Signer<'info>,
+
+    #[account(mut, seeds = [b"mint_state"], bump)]
+    pub mint_state: Account<'info, MintState>,
+
+    #[account(mut, address = mint_state.tobe_mint)]
+    pub tobe_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    /// CHECK: PDA vault authority — signs all CPI account transfers
+    #[account(seeds = [b"vault_authority"], bump = mint_state.vault_bump)]
+    pub vault_authority: UncheckedAccount<'info>,
+
+    /// Vault TOBE — source of token side
+    #[account(mut, seeds = [b"vault_token"], bump)]
+    pub vault_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: PDA holding accumulated SOL pending LP injection
+    #[account(mut, seeds = [b"pool_sol_reserve"], bump)]
+    pub pool_sol_reserve: UncheckedAccount<'info>,
+
+    /// Wrapped-SOL temp account owned by vault_authority. init_if_needed each flush.
+    #[account(
+        init_if_needed,
+        payer = caller,
+        seeds = [b"wsol_temp"],
+        bump,
+        token::mint = wsol_mint,
+        token::authority = vault_authority,
+    )]
+    pub wsol_temp: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(address = anchor_spl::token::spl_token::native_mint::ID)]
+    pub wsol_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    /// LP receipt — receives LP tokens from CPI, then immediately burned. init_if_needed.
+    #[account(
+        init_if_needed,
+        payer = caller,
+        seeds = [b"lp_receipt"],
+        bump,
+        token::mint = raydium_lp_mint,
+        token::authority = vault_authority,
+    )]
+    pub lp_receipt: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    // Raydium pool accounts (validated against state)
+    #[account(
+        mut,
+        constraint = raydium_pool_state.key() == mint_state.raydium_pool_state
+            @ TobeError::PoolMismatch,
+    )]
+    pub raydium_pool_state: AccountLoader<'info, raydium_cp_swap::states::PoolState>,
+
+    #[account(
+        mut,
+        constraint = raydium_lp_mint.key() == mint_state.raydium_lp_mint
+            @ TobeError::PoolMismatch,
+    )]
+    pub raydium_lp_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    /// CHECK: Raydium pool authority; address validated against state.
+    #[account(
+        constraint = raydium_pool_authority.key() == mint_state.raydium_pool_authority
+            @ TobeError::PoolMismatch,
+    )]
+    pub raydium_pool_authority: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        constraint = raydium_token_0_vault.key() == mint_state.raydium_token_0_vault
+            @ TobeError::PoolMismatch,
+    )]
+    pub raydium_token_0_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(
+        mut,
+        constraint = raydium_token_1_vault.key() == mint_state.raydium_token_1_vault
+            @ TobeError::PoolMismatch,
+    )]
+    pub raydium_token_1_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(address = raydium_token_0_vault.mint)]
+    pub vault_0_mint: Box<InterfaceAccount<'info, Mint>>,
+    #[account(address = raydium_token_1_vault.mint)]
+    pub vault_1_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    pub raydium_program: Program<'info, raydium_cp_swap::program::RaydiumCpSwap>,
+
+    pub token_program: Program<'info, Token>,
+    pub token_program_2022: Program<'info, anchor_spl::token_2022::Token2022>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct MigrateStateV2<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    /// CHECK: deserialized manually (old layout); validated by reading authority from raw data.
+    #[account(mut, seeds = [b"mint_state"], bump)]
+    pub mint_state: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
 #[derive(Accounts)]
 pub struct UpdateTreasury<'info> {
     #[account(constraint = authority.key() == mint_state.authority @ TobeError::Unauthorized)]
@@ -944,6 +1368,15 @@ pub struct MintState {
     pub lp_lock_bump: u8,            // 1
     pub total_minted: u64,           // 8
     pub pool_sol_balance: u64,       // 8 — accumulated SOL pending LP injection
+
+    // ─── Phase 2: Raydium pool config (set once via set_pool_config) ───
+    pub raydium_pool_state: Pubkey,        // 32 — pool ID; default = unconfigured
+    pub raydium_pool_authority: Pubkey,    // 32 — Raydium-derived auth PDA
+    pub raydium_lp_mint: Pubkey,           // 32 — pool's LP mint
+    pub raydium_token_0_vault: Pubkey,     // 32 — pool's vault for token_0
+    pub raydium_token_1_vault: Pubkey,     // 32 — pool's vault for token_1
+    pub tobe_is_token_0: bool,             // 1  — true if TOBE is token_0 in the pool
+    pub vault_tobe_at_config: u64,         // 8  — vault balance baseline for floor protection
 }
 
 // ─── Errors ───
@@ -990,6 +1423,21 @@ pub enum TobeError {
     PoolSolInsufficient,
     #[msg("Amount must be greater than zero")]
     ZeroAmount,
+    // ─── Phase 2: Raydium flush errors ───
+    #[msg("Pool config has not been set; call set_pool_config first")]
+    PoolNotConfigured,
+    #[msg("Pool config does not match accounts passed in")]
+    PoolMismatch,
+    #[msg("Pool config has already been set; cannot reconfigure")]
+    PoolAlreadyConfigured,
+    #[msg("LP-pending SOL is below flush threshold (1 SOL)")]
+    BelowFlushThreshold,
+    #[msg("Pulling TOBE from vault would breach the floor protection (30% of baseline)")]
+    VaultFloorBreach,
+    #[msg("Raydium CPI returned zero LP tokens")]
+    LpAmountZero,
+    #[msg("Pool reserves are empty; cannot compute deposit ratio")]
+    EmptyPoolReserves,
 }
 
 #[cfg(test)]
