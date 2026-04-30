@@ -6,13 +6,13 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-neco_token = "DnMvWs2dDim57TLBcJp7FKkDUFw2KnLmJybzpbTZuc65"
+neco_token = "CfdXZeKuFRGMxiedAHBemm35rANWPvcriwPEyh9KVnBQ"
 
 [programs.devnet]
-neco_token = "DnMvWs2dDim57TLBcJp7FKkDUFw2KnLmJybzpbTZuc65"
+neco_token = "CfdXZeKuFRGMxiedAHBemm35rANWPvcriwPEyh9KVnBQ"
 
 [programs.testnet]
-neco_token = "DnMvWs2dDim57TLBcJp7FKkDUFw2KnLmJybzpbTZuc65"
+neco_token = "CfdXZeKuFRGMxiedAHBemm35rANWPvcriwPEyh9KVnBQ"
 
 [registry]
 url = "https://api.apr.dev"

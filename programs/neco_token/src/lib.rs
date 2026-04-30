@@ -21,7 +21,7 @@ use pyth_solana_receiver_sdk::price_update::{get_feed_id_from_hex, PriceUpdateV2
 // Metaplex Token Metadata Program: metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s
 pub static MPL_TOKEN_METADATA_ID: Pubkey = pubkey!("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 
-declare_id!("DnMvWs2dDim57TLBcJp7FKkDUFw2KnLmJybzpbTZuc65");
+declare_id!("CfdXZeKuFRGMxiedAHBemm35rANWPvcriwPEyh9KVnBQ");
 
 const MINT_COST: u64 = 10_000_000_000; // 10 SOL in lamports (9 decimals)
 const MAX_ROUNDS: u64 = 1024;
@@ -101,12 +101,10 @@ pub mod neco_token {
         ctx: Context<Initialize>,
         treasury: Pubkey,
         admin_authority: Pubkey,
-        pyth_sol_usd_feed: Pubkey,
     ) -> Result<()> {
         let mint_state = &mut ctx.accounts.mint_state;
         mint_state.authority = admin_authority;
         mint_state.treasury = treasury;
-        mint_state.pyth_sol_usd_feed = pyth_sol_usd_feed;
         mint_state.current_round = 0;
         mint_state.tobe_mint = ctx.accounts.tobe_mint.key();
         mint_state.vault_balance = 0;
@@ -726,11 +724,10 @@ pub struct BuyFromVault<'info> {
     )]
     pub buyer_tobe: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// Pyth SOL/USD price update account; must match the configured feed.
-    #[account(
-        constraint = pyth_price_update.key() == mint_state.pyth_sol_usd_feed
-            @ TobeError::InvalidPriceFeed
-    )]
+    /// Pyth SOL/USD price update account. Feed identity is verified inside
+    /// `read_sol_usd_price` against the hardcoded SOL/USD feed_id, so any
+    /// PriceUpdateV2 with the right feed_id is accepted (sponsored, ephemeral,
+    /// or user-posted via Hermes).
     pub pyth_price_update: Account<'info, PriceUpdateV2>,
 
     pub token_program: Program<'info, Token>,
@@ -759,11 +756,10 @@ pub struct SellToVault<'info> {
     )]
     pub seller_tobe: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// Pyth SOL/USD price update account; must match the configured feed.
-    #[account(
-        constraint = pyth_price_update.key() == mint_state.pyth_sol_usd_feed
-            @ TobeError::InvalidPriceFeed
-    )]
+    /// Pyth SOL/USD price update account. Feed identity is verified inside
+    /// `read_sol_usd_price` against the hardcoded SOL/USD feed_id, so any
+    /// PriceUpdateV2 with the right feed_id is accepted (sponsored, ephemeral,
+    /// or user-posted via Hermes).
     pub pyth_price_update: Account<'info, PriceUpdateV2>,
 
     pub token_program: Program<'info, Token>,
@@ -936,7 +932,6 @@ pub struct MintState {
     pub treasury: Pubkey,            // 32
     pub tobe_mint: Pubkey,           // 32
     pub lp_mint: Pubkey,             // 32
-    pub pyth_sol_usd_feed: Pubkey,   // 32 — Pyth SOL/USD PriceUpdateV2 account
     pub current_round: u64,          // 8
     pub vault_balance: u64,          // 8
     pub total_vault_released: u64,   // 8

@@ -26,8 +26,8 @@ Pyth `PriceUpdateV2` is validated on every call:
 
 ## Contract
 
-- **Program ID:** `DnMvWs2dDim57TLBcJp7FKkDUFw2KnLmJybzpbTZuc65`
-- **TOBE Mint:** `h611YQ3wKJesFUC6NDmpzXNSAG5jYn7BJS6FrepcqbN`
+- **Program ID:** `CfdXZeKuFRGMxiedAHBemm35rANWPvcriwPEyh9KVnBQ`
+- **TOBE Mint:** *(derived from program ID — set after first `initialize`)*
 - **Network:** Solana Devnet (mainnet deployment planned)
 - **Framework:** Anchor 0.32.1
 - **Oracle:** Pyth `pyth-solana-receiver-sdk` 0.6.1
