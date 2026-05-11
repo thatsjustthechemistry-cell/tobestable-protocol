@@ -24,7 +24,7 @@ custom-panic = []
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
 anchor-spl = "0.32.1"
 pyth-solana-receiver-sdk = "0.6.1"
-raydium-cp-swap = { git = "https://github.com/raydium-io/raydium-cp-swap", rev = "609780f165d234a0aa9699cac90178a3fa36fd43", default-features = false, features = ["cpi", "devnet"] }
+raydium-cp-swap = { git = "https://github.com/raydium-io/raydium-cp-swap", rev = "609780f165d234a0aa9699cac90178a3fa36fd43", default-features = false, features = ["cpi"] }
 
 
 [lints.rust]
