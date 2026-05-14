@@ -6,19 +6,27 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-neco_token = "CfdXZeKuFRGMxiedAHBemm35rANWPvcriwPEyh9KVnBQ"
+neco_token = "Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX"
 
+# Legacy devnet deployment from Phase 1+2 verification (still live, but
+# this build now targets mainnet — declare_id! changed). Redeploys to
+# devnet would need: `anchor deploy --provider.cluster devnet
+# --program-keypair target/deploy/neco_token-keypair.json` AND a code
+# revert of declare_id!() to CfdXZe... — not recommended; devnet is done.
 [programs.devnet]
 neco_token = "CfdXZeKuFRGMxiedAHBemm35rANWPvcriwPEyh9KVnBQ"
 
+[programs.mainnet]
+neco_token = "Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX"
+
 [programs.testnet]
-neco_token = "CfdXZeKuFRGMxiedAHBemm35rANWPvcriwPEyh9KVnBQ"
+neco_token = "Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "devnet"
+cluster = "mainnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
