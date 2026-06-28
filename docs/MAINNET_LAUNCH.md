@@ -1,37 +1,42 @@
 # Mainnet Launch Runbook
 
 > **Status:** Pre-launch reference. Execute step-by-step on launch day.
-> **Decisions baked in:** Treasury = single key first → Realms (Decision 1A). Pure no-mint fair launch (Decision 2A — no founder mints, no founder pool seeding).
-> **Audit:** Skipped (user choice).
+> **Model:** Pure no-mint fair launch — no founder mints, no founder pool seeding. The community mints; the first minter (or anyone) creates the Raydium pool. `seed_pool` is NOT used.
+> **Audit:** Self-audited across all 8 vulnerability classes + a focused CPI/token re-audit; every confirmed finding fixed. See [`SELF_AUDIT.md`](./SELF_AUDIT.md). This is an AI-assisted self-audit, not a professional audit.
 
-## Constants (locked in PR #7)
+## Constants
 
 | | |
 |---|---|
 | Program ID | `Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX` |
-| Realms council vault | `Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC` |
+| Realms council vault (treasury + new authority) | `Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC` |
+| Realms council mint | `2ZdbLGkKi1Zvk5dKLqcY5UBcDdJVss8u2tGmMnN3gRHN` |
 | Realms threshold | 2-of-3 |
-| Current deployer wallet | `BzvTL4PYZzBPs51jmd2LwMYeDDbu319XmHrDLJFEuZzh` (yours; verify with `solana address`) |
+| Council members | `Eis6SPak12JXqunZqLqgHneomygF1ouuoRk5PFXB5Bvf`, `8aVTS6eVvC33wZ4viwAfm6a9ZAXDXUKWvXtto4dFzquE`, `EnRAymUEDWkT5kdfSveUmNEwgfsA6Y53JVqTeSpYuiXo` |
+| Deployer wallet | `BzvTL4PYZzBPs51jmd2LwMYeDDbu319XmHrDLJFEuZzh` (yours; verify `solana address`) |
 | Program keypair | `target/deploy/neco_token-keypair.json` (LOCAL ONLY — back up!) |
 
 ## Pre-launch checklist (do BEFORE Step 1)
 
-- [ ] `target/deploy/neco_token-keypair.json` backed up to 2 offline locations
-- [ ] Mainnet wallet balance ≥ 4 SOL: `solana balance --url mainnet-beta`
-- [ ] 3 Realms council member pubkeys documented privately
-- [ ] Public announcement drafted (Twitter/Discord/etc.)
-- [ ] 2-5 pre-committed day-one minters lined up (each ready with ≥10 SOL)
+- [ ] **Fund deployer** `BzvTL4PY...` with **≥5 SOL** mainnet: `solana balance --url mainnet-beta` (deploy briefly needs ~2× the program rent)
+- [ ] **Back up `target/deploy/neco_token-keypair.json`** to 2 offline locations (controls the program ID)
+- [ ] **Fund council wallet** `8aVTS...` (currently 0 SOL) so it can pay fees to vote
+- [ ] **Council key isolation** — confirm the 3 council keys live on separate devices (or accept "bootstrap multisig" with a written 30-day hardening plan)
+- [ ] **Governance rehearsal on devnet** — `npm install @solana/spl-governance`, then run the full propose → vote → execute → verify cycle on a devnet realm using `scripts/propose-accept-authority.js`
+- [ ] **Build with the current toolchain** (the one that builds locally / in CI — do NOT pin an old Solana, it resurfaces the `edition2024` build failure)
+- [ ] Public announcement drafted
+- [ ] ≥1 day-one minter lined up (10 SOL each)
+- [ ] (Optional but recommended) branch protection enabled on `main` requiring the `cargo check + test` CI check
 
 ## Step 1 — Deploy
 
 ```bash
 cd C:/Users/NeCDeT/Desktop/tobestable-protocol
+anchor build
 anchor deploy --provider.cluster mainnet
 ```
 
-**Cost:** ~3.3 SOL.
-**Output:** confirms program live at `Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX`.
-**Verify:** `solana program show Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX --url mainnet-beta`
+**Cost:** ~2.5–3.3 SOL (program rent). **Verify:** `solana program show Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX --url mainnet-beta`
 
 ## Step 2 — Initialize
 
@@ -39,195 +44,129 @@ anchor deploy --provider.cluster mainnet
 node scripts/mainnet-initialize.js
 ```
 
-**Cost:** ~0.05 SOL.
-**Effect:** Creates state PDA, vault token PDA, Metaplex metadata. Generates the TOBE mint. Saves the mint keypair to `scripts/.mainnet-mint.json` (back this up too).
+**Cost:** ~0.05 SOL. **Effect:** creates state PDA + vault PDAs + Metaplex metadata, generates the TOBE mint, saves the mint keypair to `scripts/.mainnet-mint.json`.
+**➡️ BACK UP `scripts/.mainnet-mint.json`** (and note the printed mint_state PDA + TOBE mint pubkey — needed below).
 
-**Verify:** `solana account <state-pda> --url mainnet-beta` should show non-zero balance.
-
-## Step 3 — Move treasury to Realms vault
+## Step 3 — Move treasury to the Realms vault
 
 ```bash
 node scripts/mainnet-update-treasury.js
 ```
 
-**Cost:** <0.01 SOL.
-**Effect:** `mint_state.treasury` → `Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC`.
-**Why now:** doing it before authority handoff means one single-sig tx instead of a multisig proposal later.
+**Effect:** `mint_state.treasury` → `Cb7TsQF...`. Do it now (single-sig) so arbitrage proceeds flow to the DAO before authority handoff.
 
 ## Step 4 — Propose authority transfer
 
 ```bash
-node scripts/propose-authority.js \
-  --network mainnet \
+node scripts/propose-authority.js --network mainnet \
   --new-authority Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC
 ```
 
-**Cost:** <0.01 SOL.
-**Effect:** `mint_state.pending_authority` → Realms vault. You still control until Step 5 completes.
+**Effect:** `mint_state.pending_authority` → Realms vault. You retain control until Step 5 completes (2-step transfer; a typo here is recoverable by re-proposing).
 
-## Step 5 — Realms accepts authority
+## Step 5 — Council accepts authority
 
-In Realms UI (mainnet, NOT devnet):
+Preferred (scripted; run as a council member, after the devnet rehearsal):
 
-1. Open your DAO at https://app.realms.today/
-2. Click **Create Proposal** → **Programmatic / Executable on-chain instructions**
-3. Title: `Accept TOBE authority transfer`
-4. Add Custom Instruction with these exact values:
-
-**Program ID:**
-```
-Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX
+```bash
+node scripts/propose-accept-authority.js --vote \
+  --description-link <optional URL>
 ```
 
-**Accounts (in order):**
-| # | Address | Signer | Writable |
-|---|---|---|---|
-| 1 | `Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC` (Treasury → new_authority) | ✅ | ❌ |
-| 2 | mint_state PDA (computed at launch; print from `scripts/mainnet-initialize.js` output) | ❌ | ✅ |
+This creates a Realms proposal that calls `accept_authority`, signs it off, and casts your yes vote. One more council member votes yes, then anyone executes.
 
-**Instruction data (hex):** `6b56c65b210c6ba0`
-
-5. Vote Yes from 2 of 3 council members.
-6. Click **Execute**.
-
-**Verify with:**
+Then verify:
 ```bash
 node scripts/verify-multisig.js --network mainnet --expected Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC
 ```
 Should print `✅`.
 
-## Step 6 — 🟢 Protocol is fully fair-launched
+<details><summary>Manual Realms-UI fallback</summary>
 
-At this point:
-- Authority is the Realms multisig (no single human can unilaterally pause/configure)
-- Treasury is the Realms vault (peg-arb proceeds flow to the DAO)
-- Vault is empty (0 TOBE)
-- No Raydium pool exists yet
-- **Waiting for community to mint**
+Custom instruction — Program `Eekx6ftd...`, data (hex) `6b56c65b210c6ba0`, accounts:
+| # | Address | Signer | Writable |
+|---|---|---|---|
+| 1 | `Cb7TsQF...` (new_authority) | ✅ | ❌ |
+| 2 | mint_state PDA | ❌ | ✅ |
+</details>
 
-**Public announcement:** "TOBESTABLE is live at `Eekx6ftd...`. First mint at 10 SOL produces 524,288 TOBE. No founder allocation. Pool creation enabled by first minter."
+## Step 6 — 🟢 Fully fair-launched
 
-## Step 7 — Community member mints round 1
+Authority = Realms multisig, treasury = Realms vault, vault empty, no pool yet. **Announce.** From here, admin instructions (`set_pool_config`, `pause`, `update_treasury`) require a 2-of-3 council proposal.
 
-Out of your hands. You announce, they mint.
+## Step 7 — Community mints
 
-**What happens on-chain when someone mints:**
-- They pay 10 SOL, receive 524,288 TOBE in their wallet
-- Vault gets 524,288 TOBE (50% of round 1)
-- `pool_sol_reserve` gets 5 SOL
-- `vault_sol_reserve` gets 5 SOL
-- `current_round` → 1
+Out of your hands. Each 10-SOL mint: minter gets round tokens, vault gets the other 50%, 5 SOL → `pool_sol_reserve`, 5 SOL → `vault_sol_reserve`, `current_round`++.
 
-## Step 8 — Pool creation (by community minter, or coordinated by you)
+## Step 8 — Community creates the Raydium pool
 
-The first minter (or anyone with TOBE) can create the Raydium pool:
-
+The first minter (or anyone with TOBE) creates the TOBE/wSOL pool:
 ```bash
 TOBE_MINT=<mainnet TOBE mint from Step 2> node scripts/mainnet-create-raydium-pool.js
 ```
+Prints 5 pool addresses → `scripts/.mainnet-pool.json`. **No `seed_pool` is called — the pool is external.**
 
-**Cost:** ~0.5 SOL.
-**Output:** prints 5 pool addresses + saves them to `scripts/.mainnet-pool.json`.
+## Step 9 — Council proposal: `set_pool_config`
 
-Whoever runs this needs:
-- At least 1000 TOBE in their wallet (or different `--seed-tobe` amount)
-- ~0.5 SOL for pool seed + fees
+Authority is now Realms, so this is a council proposal. Custom instruction:
+- **Program:** `Eekx6ftd...`
+- **Data (hex):** `d857417d716eb978` + `01` if `tobeIsToken0` (from `.mainnet-pool.json`) is true, else `00`
+- **Accounts:** (1) `Cb7TsQF...` authority ✅✅ · (2) mint_state PDA ❌✅ · (3) `raydium_pool_state` · (4) `raydium_pool_authority` · (5) `raydium_lp_mint` · (6) `raydium_token_0_vault` · (7) `raydium_token_1_vault` (3–7 ❌❌)
 
-## Step 9 — Realms proposal: `set_pool_config`
+Records the pool + captures the 30%-floor baseline (`vault_tobe_at_config`) from the current vault balance. (No longer gated on `pool_seeded` — fixed for the fair-launch flow.) After this, `flush_lp_to_raydium` is callable.
 
-In Realms UI, create another Programmatic proposal:
+## Step 10 — Anyone calls `flush_lp_to_raydium` (permissionless)
 
-**Program ID:**
-```
-Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX
-```
+Once `pool_sol_balance` ≥ 1 SOL. **Signature now takes `max_tobe_to_pair: u64`** (slippage bound) — a keeper computes it from current pool reserves + ~2% tolerance (see `scripts/devnet-set-pool-config-and-flush.js` for the calc). The frontend button supplies it. Deposits SOL+TOBE into Raydium and burns the LP (permanent liquidity); unconsumed wSOL returns to `pool_sol_reserve`.
 
-**Args (u8 bool `tobe_is_token_0`):**
-- `0x01` if `tobeIsToken0` in `scripts/.mainnet-pool.json` is `true`
-- `0x00` if `false`
+## Step 11 — Arm the $1 floor (permissionless, once TOBE reaches $1)
 
-**Accounts (in order):**
-| # | Address | Signer | Writable |
+`sell_to_vault` (the $1 floor) is **disabled until TOBE first reaches $1** — a one-way latch that blocks the early below-peg drain. Once the market price reaches $1, anyone calls `arm_floor` to enable it permanently:
+- **Discriminator:** `cbf35c2766bfc696`, no args
+- Reads the pool vaults (validated against config) × Pyth SOL/USD; sets `floor_active = true` if TOBE/USD ≥ $1.
+- A `scripts/arm-floor.js` helper is the cleanest way to call it (TODO: add).
+
+## Admin instruction discriminators (for Realms proposals)
+
+| Instruction | Discriminator | Args | Use |
 |---|---|---|---|
-| 1 | `Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC` (authority) | ✅ | ✅ |
-| 2 | mint_state PDA | ❌ | ✅ |
-| 3 | `raydium_pool_state` from `.mainnet-pool.json` | ❌ | ❌ |
-| 4 | `raydium_pool_authority` | ❌ | ❌ |
-| 5 | `raydium_lp_mint` | ❌ | ❌ |
-| 6 | `raydium_token_0_vault` | ❌ | ❌ |
-| 7 | `raydium_token_1_vault` | ❌ | ❌ |
+| `accept_authority` | `6b56c65b210c6ba0` | — | Step 5 |
+| `set_pool_config` | `d857417d716eb978` | `tobe_is_token_0: bool` | Step 9 |
+| `arm_floor` | `cbf35c2766bfc696` | — | Step 11 (permissionless) |
+| `flush_lp_to_raydium` | `1324c3f558c78cd9` | `max_tobe_to_pair: u64` | Step 10 (permissionless) |
+| `update_treasury` | `3c10f342603bfe83` | `new_treasury: pubkey` | Redirect proceeds |
+| `pause` | `d316ddfb4a79c12f` | — | Emergency stop (now gates mint + all fund-moving ix) |
+| `unpause` | `a99004260a8dbcff` | — | Resume |
 
-**Instruction data:** `d857417d716eb978` + `01` (or `00`) for `tobe_is_token_0`
-- Full example if `tobe_is_token_0 = true`: `d857417d716eb97801`
-- Full example if `tobe_is_token_0 = false`: `d857417d716eb97800`
+## Rollback / recovery
 
-Vote 2 of 3, execute. After this, `flush_lp_to_raydium` becomes callable.
+- **Before Step 5 (you still hold authority):** fix anything with admin instructions; worst case `pause`, redeploy with fixes (program is upgradeable until upgrade authority is rotated), `unpause`.
+- **Wrong pending authority (Step 4 typo):** re-run `propose-authority.js` with the correct pubkey — the 2-step pattern overwrites until `accept_authority` runs.
+- **Step 5 never reaches quorum:** `pending_authority` sits harmlessly; you retain control. Re-propose or get votes.
+- **Lost program keypair after deploy:** can't upgrade anymore (existing functionality keeps working). Don't lose it.
+- **Lost TOBE mint keypair:** harmless — mint authority is a PDA, not the keypair.
 
-## Step 10 — Anyone calls `flush_lp_to_raydium`
+## Estimated cost (SOL ≈ $70)
 
-Permissionless. Once `pool_sol_balance` ≥ 1 SOL (true after Step 7's mint), anyone can call this and trigger an automatic pool deepening. The frontend has a button for this.
-
-## Frontend update (parallel workstream)
-
-After Step 2 (you know the mainnet program ID + TOBE mint), update `tobe-mint` repo similar to PR #1 pattern:
-- Replace `CfdXZeKuFRGMxiedAHBemm35rANWPvcriwPEyh9KVnBQ` → `Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX`
-- Replace `4fFD96LWnsgCiWMtLJym12k7xLofH6FdSDtr5MgyYmHV` → new mainnet TOBE mint
-- Change `NETWORK` constant to `'mainnet'`
-- Cache-bust `lang.js?v=phase-c` → `?v=mainnet`
-
-## Other admin discriminators (for future Realms proposals)
-
-| Instruction | Discriminator (hex) | Use case |
+| Step | SOL | USD |
 |---|---|---|
-| `accept_authority` | `6b56c65b210c6ba0` | Step 5 |
-| `set_pool_config` | `d857417d716eb978` | Step 9 |
-| `update_treasury` | `3c10f342603bfe83` | If you need to redirect peg-arb proceeds again |
-| `pause` | `d316ddfb4a79c12f` | Emergency stop minting |
-| `unpause` | `a99004260a8dbcff` | Resume after emergency |
+| 1 Deploy | ~2.5–3.3 | ~$175–230 |
+| 2 Initialize | ~0.05 | ~$3.50 |
+| 3 Update treasury | <0.01 | — |
+| 4 Propose authority | <0.01 | — |
+| 5 Accept (council) | <0.01 | from council deposits |
+| **Your total (steps 1–4)** | **~3.4 SOL** | **~$240** |
 
-## Rollback / Recovery scenarios
+Pool seed (Step 8) + `set_pool_config` (Step 9) are paid by the community minter / council.
 
-### If something goes wrong between Step 2 and Step 5
-You still hold authority. Use the existing admin instructions to fix anything. Worst case: `pause`, redeploy with fixes (programs are upgradable until upgrade authority is rotated/revoked), unpause.
+## Frontend update (after Step 2)
 
-### If Step 4 sets wrong pending authority (typo'd pubkey)
-Call `propose_authority` again with the correct pubkey from your current authority wallet. The 2-step pattern is designed for this: until `accept_authority` runs, the propose can be overwritten.
+In `tobe-mint` (both root + `tobestable/`):
+- Program ID `CfdXZe...` (devnet) → `Eekx6ftd...`
+- TOBE mint → the new mainnet mint from Step 2
+- `NETWORK` constant → `'mainnet'`
+- Bump cache-bust `lang.js?v=...`
 
-### If Step 5 doesn't reach quorum
-The pending_authority sits indefinitely. Nothing breaks. You retain control. Either get the votes or re-propose with a different new_authority.
+## Listings (after pool live + ~7 days activity)
 
-### Loss of program upgrade keypair AFTER deploy
-You can no longer upgrade the deployed program. Existing functionality continues to work — only fixes/improvements are blocked. **Don't lose `target/deploy/neco_token-keypair.json`.**
-
-### Loss of TOBE mint keypair
-Symbolic only. The mint authority is the `mint_authority` PDA, not the mint keypair. The mint keypair can only close the mint account (and only if supply is 0, which it won't be). Loss is essentially harmless. Still, back it up.
-
-## Estimated total cost
-
-| Step | Cost (SOL) |
-|---|---|
-| 1 Deploy | 3.3 |
-| 2 Initialize | 0.05 |
-| 3 Update treasury | <0.01 |
-| 4 Propose authority | <0.01 |
-| 5 Realms accept | <0.01 (paid from Realms council deposits) |
-| 8 Pool seed (whoever creates) | 0.5 + minimum SOL liquidity (e.g., 0.02) |
-| 9 Realms set_pool_config | <0.01 |
-| **Total for you** | **~3.4 SOL** (you pay steps 1-4; 5-9 paid by Realms/community) |
-
-## Listings (separate timeline; see docs/listings/)
-
-After Step 9 (pool live + configured) and 7+ days of mint activity:
-
-1. Submit Jupiter Verified Token List (see `docs/listings/jupiter-verified-token-list.md`)
-2. Wait ~1 week, submit CoinGecko (see `docs/listings/coingecko-submission.md`)
-3. Wait ~1 month after CG, submit CoinMarketCap (see `docs/listings/coinmarketcap-submission.md`)
-
-## Frontend listings checklist (token-metadata.json)
-
-After Step 9, update `tobe-mint/token-metadata.json` extensions section with:
-- Real Twitter handle once social presence established
-- CoinGecko ID after listing approved
-- CMC ID after listing approved
-
-See `tobe-mint/docs/TOKEN_METADATA.md` for the update procedure.
+Jupiter verified list → CoinGecko (~1 wk later) → CoinMarketCap (~1 mo after CG). See `docs/listings/`. Then update `tobe-mint/token-metadata.json` extensions (socials, CG/CMC IDs).
