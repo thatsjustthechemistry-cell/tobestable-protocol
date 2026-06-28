@@ -1,13 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
-//  TOBE STABLE — SOL VERSION (for future testnet/mainnet deploy)
-//  Cost: 10 SOL per mint round (no USDC)
-//  Users deal with SOL + $TOBE only.
-//
-//  DEPLOY CHECKLIST:
-//    1. Copy this file over lib.rs before building
-//    2. Run: anchor build
-//    3. Run: anchor deploy --provider.cluster testnet
-//    4. Update frontend: all "1,024 USDC" → "10 SOL"
+//  TOBE STABLE — live program (SOL version).
+//  Cost: 10 SOL per mint round. Users deal with SOL + $TOBE only.
+//  This is the single source of truth; build with `anchor build` from here.
 // ═══════════════════════════════════════════════════════════════════════════
 
 use anchor_lang::prelude::*;
@@ -34,8 +28,10 @@ const LP_LOCK_DURATION: i64 = 2 * 365 * 24 * 60 * 60; // 2 years in seconds
 const SOL_USD_FEED_ID_HEX: &str =
     "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
 
-// Reject Pyth prices older than this many seconds.
-const PYTH_MAX_STALENESS_SECS: u64 = 60;
+// Reject Pyth prices older than this many seconds. Kept tight to shrink the
+// window in which a caller can post the most favorable recent price (timing
+// arbitrage against the vault).
+const PYTH_MAX_STALENESS_SECS: u64 = 15;
 // Reject Pyth prices where confidence interval > 1% of price.
 const PYTH_MAX_CONF_BPS: u128 = 100;
 
@@ -51,6 +47,10 @@ fn read_sol_usd_price(price_update: &Account<PriceUpdateV2>) -> Result<(i64, i32
         .map_err(|_| error!(TobeError::StalePriceFeed))?;
 
     require!(price.price > 0, TobeError::NonPositivePrice);
+    // A reported confidence of 0 is degenerate (uninitialized / aggregation
+    // anomaly), not "perfectly precise" — reject it rather than letting the
+    // conf_bps check pass trivially.
+    require!(price.conf > 0, TobeError::PriceConfidenceTooWide);
 
     // conf / price <= PYTH_MAX_CONF_BPS / 10000
     let conf_bps = (price.conf as u128)
@@ -283,6 +283,7 @@ pub mod neco_token {
     /// Buyer sends `sol_in_lamports`, receives equivalent TOBE at $1 each.
     /// All received SOL flows to the treasury (authority's wallet).
     pub fn buy_from_vault(ctx: Context<BuyFromVault>, sol_in_lamports: u64) -> Result<()> {
+        require!(!ctx.accounts.mint_state.paused, TobeError::MintingPaused);
         require!(sol_in_lamports > 0, TobeError::ZeroAmount);
 
         let (price, exponent) = read_sol_usd_price(&ctx.accounts.pyth_price_update)?;
@@ -342,6 +343,7 @@ pub mod neco_token {
     /// Seller sends TOBE, receives SOL drawn from vault_sol_reserve at $1 each.
     /// Bought TOBE returns to vault to replenish the upside-cap reserve.
     pub fn sell_to_vault(ctx: Context<SellToVault>, tobe_in_raw: u64) -> Result<()> {
+        require!(!ctx.accounts.mint_state.paused, TobeError::MintingPaused);
         require!(tobe_in_raw > 0, TobeError::ZeroAmount);
 
         let (price, exponent) = read_sol_usd_price(&ctx.accounts.pyth_price_update)?;
@@ -361,19 +363,25 @@ pub mod neco_token {
             tobe_in_raw,
         )?;
 
-        // 2. Vault SOL reserve → seller (direct lamport mutation; PDA holds SOL).
-        let vault_sol = &ctx.accounts.vault_sol_reserve;
-        let vault_sol_lamports = vault_sol.lamports();
+        // 2. Vault SOL reserve → seller. vault_sol_reserve is owned by the System
+        //    program (only ever funded via system_program::transfer), so lamports
+        //    must leave via a PDA-signed system transfer — a program may not
+        //    direct-mutate the lamports of an account it does not own. (Same
+        //    pattern as seed_pool / flush_lp_to_raydium for pool_sol_reserve.)
+        let vault_sol_lamports = ctx.accounts.vault_sol_reserve.lamports();
         require!(vault_sol_lamports >= sol_out, TobeError::VaultSolInsufficient);
-        **vault_sol.try_borrow_mut_lamports()? = vault_sol_lamports
-            .checked_sub(sol_out)
-            .ok_or(TobeError::VaultSolInsufficient)?;
-        **ctx.accounts.seller.try_borrow_mut_lamports()? = ctx
-            .accounts
-            .seller
-            .lamports()
-            .checked_add(sol_out)
-            .ok_or(TobeError::MathOverflow)?;
+        let vault_sol_seeds: &[&[u8]] = &[b"vault_sol_reserve", &[ctx.bumps.vault_sol_reserve]];
+        anchor_lang::system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.vault_sol_reserve.to_account_info(),
+                    to: ctx.accounts.seller.to_account_info(),
+                },
+                &[vault_sol_seeds],
+            ),
+            sol_out,
+        )?;
 
         let mint_state = &mut ctx.accounts.mint_state;
         mint_state.vault_balance = mint_state
@@ -392,6 +400,7 @@ pub mod neco_token {
     /// Authority calls this once after round 1 to create the TOBE/SOL pool.
     pub fn seed_pool(ctx: Context<SeedPool>) -> Result<()> {
         let mint_state = &mut ctx.accounts.mint_state;
+        require!(!mint_state.paused, TobeError::MintingPaused);
         require!(!mint_state.pool_seeded, TobeError::PoolAlreadySeeded);
 
         // Round 1 vault tokens: 1024 * 1024 * 10^9 / 2 = 524,288,000,000,000
@@ -435,6 +444,10 @@ pub mod neco_token {
         mint_state.vault_balance = mint_state.vault_balance
             .checked_sub(round1_vault)
             .ok_or(TobeError::MathOverflow)?;
+        // seed_pool drains the entire physical pool_sol_reserve above, so the
+        // logical accumulator must be zeroed to stay in sync — otherwise
+        // flush_lp_to_raydium would later try to move more SOL than exists.
+        mint_state.pool_sol_balance = 0;
         mint_state.pool_seeded = true;
 
         msg!("Pool seeded: {} TOBE + {} lamports SOL", round1_vault, sol_balance);
@@ -458,6 +471,10 @@ pub mod neco_token {
 
     pub fn set_pool_config(ctx: Context<SetPoolConfig>, tobe_is_token_0: bool) -> Result<()> {
         let mint_state = &mut ctx.accounts.mint_state;
+        // Must run AFTER seed_pool so the 30%-floor baseline (vault_tobe_at_config,
+        // set below) is captured against the post-seed vault_balance. Capturing it
+        // pre-seed would set the floor too high and could soft-lock flush.
+        require!(mint_state.pool_seeded, TobeError::PoolNotConfigured);
         require!(
             mint_state.raydium_pool_state == Pubkey::default(),
             TobeError::PoolAlreadyConfigured
@@ -481,12 +498,13 @@ pub mod neco_token {
         Ok(())
     }
 
-    pub fn flush_lp_to_raydium(ctx: Context<FlushLpToRaydium>) -> Result<()> {
+    pub fn flush_lp_to_raydium(ctx: Context<FlushLpToRaydium>, max_tobe_to_pair: u64) -> Result<()> {
         const FLUSH_MIN_LAMPORTS: u64 = 1_000_000_000; // 1 SOL
         const VAULT_FLOOR_BPS: u128 = 3000; // 30%
 
         let mint_state = &mut ctx.accounts.mint_state;
 
+        require!(!mint_state.paused, TobeError::MintingPaused);
         require!(
             mint_state.raydium_pool_state != Pubkey::default(),
             TobeError::PoolNotConfigured
@@ -525,6 +543,13 @@ pub mod neco_token {
             .ok_or(TobeError::MathOverflow)?
             .try_into()
             .map_err(|_| error!(TobeError::MathOverflow))?;
+
+        // Slippage / sandwich protection: tobe_to_pair is derived from the LIVE
+        // (attacker-influenceable) pool ratio. An honest keeper passes a
+        // max_tobe_to_pair computed off-chain from current reserves; if someone
+        // front-runs to skew the ratio, the required TOBE exceeds that bound and
+        // we revert rather than deposit at a manipulated ratio.
+        require!(tobe_to_pair <= max_tobe_to_pair, TobeError::SlippageExceeded);
 
         // Floor protection
         let floor: u64 = ((mint_state.vault_tobe_at_config as u128)
@@ -587,8 +612,13 @@ pub mod neco_token {
                 ctx.accounts.vault_token_account.to_account_info(),
             )
         };
-        let max_tobe = mint_state.vault_balance;
+        // Cap the TOBE Raydium may pull at the caller's slippage bound, so even a
+        // skewed ratio cannot drain more than tolerated.
+        let max_tobe = mint_state.vault_balance.min(max_tobe_to_pair);
         let max_sol = sol_to_deposit;
+        // Snapshot real vault TOBE before the deposit so we can decrement state by
+        // the ACTUAL amount Raydium consumed, not a pre-CPI estimate (#6).
+        let vault_tobe_before = ctx.accounts.vault_token_account.amount;
         let (max_token_0, max_token_1) = if mint_state.tobe_is_token_0 {
             (max_tobe, max_sol)
         } else {
@@ -639,7 +669,7 @@ pub mod neco_token {
             lp_received,
         )?;
 
-        // 6. Close wsol_temp, return rent to caller
+        // 6. Close wsol_temp and the (now-empty) lp_receipt, returning rent to caller
         token::close_account(CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             token::CloseAccount {
@@ -649,17 +679,32 @@ pub mod neco_token {
             },
             vault_signer,
         ))?;
+        token::close_account(CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            token::CloseAccount {
+                account: ctx.accounts.lp_receipt.to_account_info(),
+                destination: ctx.accounts.caller.to_account_info(),
+                authority: ctx.accounts.vault_authority.to_account_info(),
+            },
+            vault_signer,
+        ))?;
 
-        // 7. Update state
+        // 7. Update state. Decrement vault_balance by the TOBE Raydium ACTUALLY
+        //    consumed (measured), so the counter stays equal to the real token
+        //    account balance — never drifts off a pre-CPI estimate (#6).
+        ctx.accounts.vault_token_account.reload()?;
+        let tobe_spent = vault_tobe_before
+            .checked_sub(ctx.accounts.vault_token_account.amount)
+            .ok_or(TobeError::MathOverflow)?;
         mint_state.pool_sol_balance = 0;
         mint_state.vault_balance = mint_state
             .vault_balance
-            .checked_sub(tobe_to_pair)
+            .checked_sub(tobe_spent)
             .ok_or(TobeError::MathOverflow)?;
 
         msg!(
             "Flush: deposited {} TOBE + {} lamports → {} LP burned",
-            tobe_to_pair,
+            tobe_spent,
             sol_to_deposit,
             lp_received,
         );
@@ -1091,8 +1136,10 @@ pub struct SetPoolConfig<'info> {
     #[account(mut, seeds = [b"mint_state"], bump)]
     pub mint_state: Account<'info, MintState>,
 
-    /// CHECK: pool ID; address recorded into state verbatim.
-    pub raydium_pool_state: UncheckedAccount<'info>,
+    /// Pool ID; typed as AccountLoader so Anchor enforces it is a genuine
+    /// Raydium CP-swap pool account (owned by the Raydium program) at config
+    /// time, not an arbitrary key. Address is recorded into state.
+    pub raydium_pool_state: AccountLoader<'info, raydium_cp_swap::states::PoolState>,
 
     /// CHECK: Raydium pool authority PDA; recorded into state.
     pub raydium_pool_authority: UncheckedAccount<'info>,
@@ -1438,6 +1485,8 @@ pub enum TobeError {
     LpAmountZero,
     #[msg("Pool reserves are empty; cannot compute deposit ratio")]
     EmptyPoolReserves,
+    #[msg("Flush slippage exceeded: required TOBE exceeds caller's max_tobe_to_pair")]
+    SlippageExceeded,
 }
 
 #[cfg(test)]

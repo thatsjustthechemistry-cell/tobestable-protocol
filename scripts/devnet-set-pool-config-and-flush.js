@@ -106,9 +106,20 @@ async function main() {
   }
 
   // Step 2: flush_lp_to_raydium
+  // Compute the slippage bound (max_tobe_to_pair) from the CURRENT pool ratio,
+  // plus a 2% tolerance. If the pool is sandwiched between now and execution,
+  // the on-chain required TOBE exceeds this and the flush reverts (by design).
+  const t0Bal = await connection.getTokenAccountBalance(new PublicKey(pool.token0Vault));
+  const t1Bal = await connection.getTokenAccountBalance(new PublicKey(pool.token1Vault));
+  const poolTobe = BigInt(pool.tobeIsToken0 ? t0Bal.value.amount : t1Bal.value.amount);
+  const poolSol = BigInt(pool.tobeIsToken0 ? t1Bal.value.amount : t0Bal.value.amount);
+  const solToDeposit = BigInt(state.poolSolBalance.toString());
+  const expectedTobe = (solToDeposit * poolTobe) / poolSol + 1n;
+  const maxTobeToPair = (expectedTobe * 102n) / 100n; // +2% slippage tolerance
+  console.log("  max_tobe_to_pair (2% tol):", maxTobeToPair.toString());
   console.log("\nCalling flush_lp_to_raydium...");
   const flushTx = await program.methods
-    .flushLpToRaydium()
+    .flushLpToRaydium(new anchor.BN(maxTobeToPair.toString()))
     .accounts({
       caller: payer.publicKey,
       mintState: mintStatePda,
