@@ -521,10 +521,12 @@ pub mod neco_token {
 
     pub fn set_pool_config(ctx: Context<SetPoolConfig>, tobe_is_token_0: bool) -> Result<()> {
         let mint_state = &mut ctx.accounts.mint_state;
-        // Must run AFTER seed_pool so the 30%-floor baseline (vault_tobe_at_config,
-        // set below) is captured against the post-seed vault_balance. Capturing it
-        // pre-seed would set the floor too high and could soft-lock flush.
-        require!(mint_state.pool_seeded, TobeError::PoolNotConfigured);
+        // NOT gated on pool_seeded: the fair-launch flow creates the Raydium pool
+        // externally (a community minter) and never calls seed_pool, so
+        // pool_seeded stays false. vault_tobe_at_config (the 30%-floor baseline,
+        // set below) is captured from the current vault_balance. If the optional
+        // founder-seed path (seed_pool) is ever used instead, call seed_pool
+        // BEFORE this so the baseline reflects the post-seed vault balance.
         require!(
             mint_state.raydium_pool_state == Pubkey::default(),
             TobeError::PoolAlreadyConfigured
