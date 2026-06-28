@@ -1136,8 +1136,10 @@ pub struct SetPoolConfig<'info> {
     #[account(mut, seeds = [b"mint_state"], bump)]
     pub mint_state: Account<'info, MintState>,
 
-    /// CHECK: pool ID; address recorded into state verbatim.
-    pub raydium_pool_state: UncheckedAccount<'info>,
+    /// Pool ID; typed as AccountLoader so Anchor enforces it is a genuine
+    /// Raydium CP-swap pool account (owned by the Raydium program) at config
+    /// time, not an arbitrary key. Address is recorded into state.
+    pub raydium_pool_state: AccountLoader<'info, raydium_cp_swap::states::PoolState>,
 
     /// CHECK: Raydium pool authority PDA; recorded into state.
     pub raydium_pool_authority: UncheckedAccount<'info>,
