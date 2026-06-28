@@ -1,0 +1,80 @@
+name: CI
+
+# Runs on every PR into main and on pushes to main, so branch protection can
+# require these checks before a merge is allowed.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Fast gate: compiles the program for the host target and runs unit tests.
+  #    Catches ~all compile errors + the pyth_math_tests in ~2-4 min (cached).
+  #    This is the job to mark as a REQUIRED status check in branch protection.
+  check:
+    name: cargo check + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
+        continue-on-error: true # advisory only — don't block merges on formatting
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  # ── Full build: installs the Solana + Anchor toolchain and produces the
+  #    deployable .so + IDL exactly like a local `anchor build`. Slower
+  #    (~8-12 min). Optional to require — see docs note in the PR.
+  anchor-build:
+    name: anchor build (BPF + IDL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system deps for Anchor CLI
+        run: sudo apt-get update && sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev
+
+      - name: Install Solana CLI
+        run: |
+          # Use the current stable Agave — its bundled Cargo is new enough for
+          # deps that require edition2024 (older pinned versions ship Cargo 1.79
+          # and fail to parse such manifests).
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Solana
+        run: solana --version
+
+      - name: Install Anchor CLI (0.32.1)
+        run: cargo install --git https://github.com/coral-xyz/anchor --tag v0.32.1 anchor-cli --locked
+
+      - name: anchor build
+        run: anchor build
