@@ -16,7 +16,7 @@
 | 4 | High | `flush_lp_to_raydium` sandwichable — deposited at attacker-skewed pool ratio with no slippage bound | ✅ Fixed (slippage param + max-pull cap) |
 | 5 | Medium | Pyth 60s staleness window enabled price-selection timing arbitrage | ✅ Fixed (→15s) |
 | 6 | Medium | `flush` decremented `vault_balance` by a pre-CPI estimate, drifting from the real token balance | ✅ Fixed (measured delta) |
-| 7 | Medium | `set_pool_config` could capture the 30%-floor baseline pre-seed, soft-locking `flush` | ✅ Fixed (requires `pool_seeded`) |
+| 7 | Medium | `set_pool_config` could capture the 30%-floor baseline pre-seed, soft-locking `flush` | ✅ Fixed (ordering documented; `pool_seeded` gate reverted — it broke the fair-launch flow, which never calls `seed_pool`) |
 | 8 | Low | `set_pool_config` recorded unchecked Raydium account keys | ⚠️ Partially fixed (pool_state now validated; vault cross-binding deferred) |
 | 9 | Low | `tobe_to_pair` unconditional `+1` could trip the floor guard by 1 unit | ➖ Mitigated/accepted (measured decrement makes it a harmless conservative buffer) |
 | 10 | Low | Pyth confidence check passed when `conf == 0` | ✅ Fixed |
@@ -42,7 +42,7 @@
 
 **#6 — accounting.** `vault_balance` now decremented by the measured TOBE delta (snapshot before / `reload()` after the CPI).
 
-**#7 — ordering.** `set_pool_config` requires `pool_seeded`.
+**#7 — ordering.** Initially gated `set_pool_config` on `pool_seeded`, but that broke the chosen fair-launch flow (the pool is created externally and `seed_pool` is never called, so `pool_seeded` stays false and `set_pool_config` would revert). Reverted the gate; `vault_tobe_at_config` is captured from the current `vault_balance` at config time (correct for fair launch). Documented in-code that the optional `seed_pool` path must run before `set_pool_config`.
 
 **#8 — pool config.** `raydium_pool_state` typed as `AccountLoader<PoolState>` (enforces Raydium ownership). Residual: recorded `token_0/1_vault` keys are not cross-derived from `pool_state` (authority-trust; recommended follow-up before relying on third-party flush integrity).
 
