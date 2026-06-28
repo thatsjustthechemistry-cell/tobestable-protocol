@@ -64,7 +64,10 @@ jobs:
 
       - name: Install Solana CLI
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.0/install)"
+          # Use the current stable Agave — its bundled Cargo is new enough for
+          # deps that require edition2024 (older pinned versions ship Cargo 1.79
+          # and fail to parse such manifests).
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
       - name: Verify Solana
