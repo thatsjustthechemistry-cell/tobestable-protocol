@@ -719,16 +719,26 @@ pub mod neco_token {
             lp_received,
         )?;
 
-        // 6. Close wsol_temp and the (now-empty) lp_receipt, returning rent to caller
+        // 6. Reconcile the SOL side like the TOBE side. Raydium consumes SOL
+        //    based on the fee-EXCLUDED (net) vault, while target_lp is sized from
+        //    the raw vault, so on a fee-bearing pool some wrapped SOL is left
+        //    unconsumed in wsol_temp. Measure that residual and close wsol_temp
+        //    to the protocol's pool_sol_reserve (NOT the caller) so the leftover
+        //    protocol SOL + this account's rent return to the protocol instead of
+        //    being swept by the permissionless caller. The residual rolls forward
+        //    in accounting for the next flush.
+        ctx.accounts.wsol_temp.reload()?;
+        let sol_residual = ctx.accounts.wsol_temp.amount;
         token::close_account(CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             token::CloseAccount {
                 account: ctx.accounts.wsol_temp.to_account_info(),
-                destination: ctx.accounts.caller.to_account_info(),
+                destination: ctx.accounts.pool_sol_reserve.to_account_info(),
                 authority: ctx.accounts.vault_authority.to_account_info(),
             },
             vault_signer,
         ))?;
+        // lp_receipt only holds rent after the burn — return that to the caller.
         token::close_account(CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             token::CloseAccount {
@@ -746,7 +756,9 @@ pub mod neco_token {
         let tobe_spent = vault_tobe_before
             .checked_sub(ctx.accounts.vault_token_account.amount)
             .ok_or(TobeError::MathOverflow)?;
-        mint_state.pool_sol_balance = 0;
+        // Roll the unconsumed SOL forward instead of zeroing (which would drop
+        // the leaked-then-reclaimed residual from accounting).
+        mint_state.pool_sol_balance = sol_residual;
         mint_state.vault_balance = mint_state
             .vault_balance
             .checked_sub(tobe_spent)

@@ -76,6 +76,28 @@ than the tiny reserve yields), and the read vaults are constrained to the record
 pool config. It is **not** a TWAP — a determined actor could spike the spot price
 to arm the latch once. A future hardening could require a time-averaged price.
 
+## Focused CPI / token / mint / reentrancy re-audit (round 2)
+
+After the fixes above (which changed the CPI surface), a second focused audit
+covered the class the first run never reached. Result: **no Critical/High** on
+the CPI/token/mint surface — `mint_to` authority gating, the Raydium deposit CPI
+account set + signer seeds, the LP burn, PDA-signed system transfers, and the
+TOBE-side measured-delta accounting all verified sound. One **Medium** confirmed
+and fixed:
+
+**CPI-1 (Medium, fixed): `flush_lp_to_raydium` leaked unconsumed wrapped-SOL to
+the caller.** The TOBE side of the deposit is reconciled by a measured
+before/after delta, but the SOL side was not. Flush wraps the entire
+`pool_sol_balance` into `wsol_temp`, yet Raydium consumes SOL from the
+fee-EXCLUDED (net) vault while `target_lp` is sized from the raw vault — so on a
+fee-bearing pool a sliver of wSOL is left unconsumed. `close_account` sent
+`wsol_temp` to the permissionless `caller`, and `pool_sol_balance = 0` dropped it
+from accounting, letting a bot collect protocol SOL each flush (bounded by the
+pool's accrued-fee ratio).
+*Fix:* reload `wsol_temp` after the deposit, close it to `pool_sol_reserve`
+(protocol PDA) instead of `caller`, and set `pool_sol_balance` to the measured
+residual so it rolls forward — mirroring the TOBE-side reconciliation.
+
 ## Recommended follow-ups
 1. Re-run the `cpi-token` reviewer + a focused review of the Raydium CPI account set.
 2. Cross-derive `token_0/1_vault` from `pool_state` in `set_pool_config` (completes #8).
