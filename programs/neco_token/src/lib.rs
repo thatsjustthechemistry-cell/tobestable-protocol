@@ -283,6 +283,7 @@ pub mod neco_token {
     /// Buyer sends `sol_in_lamports`, receives equivalent TOBE at $1 each.
     /// All received SOL flows to the treasury (authority's wallet).
     pub fn buy_from_vault(ctx: Context<BuyFromVault>, sol_in_lamports: u64) -> Result<()> {
+        require!(!ctx.accounts.mint_state.paused, TobeError::MintingPaused);
         require!(sol_in_lamports > 0, TobeError::ZeroAmount);
 
         let (price, exponent) = read_sol_usd_price(&ctx.accounts.pyth_price_update)?;
@@ -342,6 +343,7 @@ pub mod neco_token {
     /// Seller sends TOBE, receives SOL drawn from vault_sol_reserve at $1 each.
     /// Bought TOBE returns to vault to replenish the upside-cap reserve.
     pub fn sell_to_vault(ctx: Context<SellToVault>, tobe_in_raw: u64) -> Result<()> {
+        require!(!ctx.accounts.mint_state.paused, TobeError::MintingPaused);
         require!(tobe_in_raw > 0, TobeError::ZeroAmount);
 
         let (price, exponent) = read_sol_usd_price(&ctx.accounts.pyth_price_update)?;
@@ -361,19 +363,25 @@ pub mod neco_token {
             tobe_in_raw,
         )?;
 
-        // 2. Vault SOL reserve → seller (direct lamport mutation; PDA holds SOL).
-        let vault_sol = &ctx.accounts.vault_sol_reserve;
-        let vault_sol_lamports = vault_sol.lamports();
+        // 2. Vault SOL reserve → seller. vault_sol_reserve is owned by the System
+        //    program (only ever funded via system_program::transfer), so lamports
+        //    must leave via a PDA-signed system transfer — a program may not
+        //    direct-mutate the lamports of an account it does not own. (Same
+        //    pattern as seed_pool / flush_lp_to_raydium for pool_sol_reserve.)
+        let vault_sol_lamports = ctx.accounts.vault_sol_reserve.lamports();
         require!(vault_sol_lamports >= sol_out, TobeError::VaultSolInsufficient);
-        **vault_sol.try_borrow_mut_lamports()? = vault_sol_lamports
-            .checked_sub(sol_out)
-            .ok_or(TobeError::VaultSolInsufficient)?;
-        **ctx.accounts.seller.try_borrow_mut_lamports()? = ctx
-            .accounts
-            .seller
-            .lamports()
-            .checked_add(sol_out)
-            .ok_or(TobeError::MathOverflow)?;
+        let vault_sol_seeds: &[&[u8]] = &[b"vault_sol_reserve", &[ctx.bumps.vault_sol_reserve]];
+        anchor_lang::system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.vault_sol_reserve.to_account_info(),
+                    to: ctx.accounts.seller.to_account_info(),
+                },
+                &[vault_sol_seeds],
+            ),
+            sol_out,
+        )?;
 
         let mint_state = &mut ctx.accounts.mint_state;
         mint_state.vault_balance = mint_state
@@ -392,6 +400,7 @@ pub mod neco_token {
     /// Authority calls this once after round 1 to create the TOBE/SOL pool.
     pub fn seed_pool(ctx: Context<SeedPool>) -> Result<()> {
         let mint_state = &mut ctx.accounts.mint_state;
+        require!(!mint_state.paused, TobeError::MintingPaused);
         require!(!mint_state.pool_seeded, TobeError::PoolAlreadySeeded);
 
         // Round 1 vault tokens: 1024 * 1024 * 10^9 / 2 = 524,288,000,000,000
@@ -435,6 +444,10 @@ pub mod neco_token {
         mint_state.vault_balance = mint_state.vault_balance
             .checked_sub(round1_vault)
             .ok_or(TobeError::MathOverflow)?;
+        // seed_pool drains the entire physical pool_sol_reserve above, so the
+        // logical accumulator must be zeroed to stay in sync — otherwise
+        // flush_lp_to_raydium would later try to move more SOL than exists.
+        mint_state.pool_sol_balance = 0;
         mint_state.pool_seeded = true;
 
         msg!("Pool seeded: {} TOBE + {} lamports SOL", round1_vault, sol_balance);
@@ -487,6 +500,7 @@ pub mod neco_token {
 
         let mint_state = &mut ctx.accounts.mint_state;
 
+        require!(!mint_state.paused, TobeError::MintingPaused);
         require!(
             mint_state.raydium_pool_state != Pubkey::default(),
             TobeError::PoolNotConfigured
