@@ -1,13 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
-//  TOBE STABLE — SOL VERSION (for future testnet/mainnet deploy)
-//  Cost: 10 SOL per mint round (no USDC)
-//  Users deal with SOL + $TOBE only.
-//
-//  DEPLOY CHECKLIST:
-//    1. Copy this file over lib.rs before building
-//    2. Run: anchor build
-//    3. Run: anchor deploy --provider.cluster testnet
-//    4. Update frontend: all "1,024 USDC" → "10 SOL"
+//  TOBE STABLE — live program (SOL version).
+//  Cost: 10 SOL per mint round. Users deal with SOL + $TOBE only.
+//  This is the single source of truth; build with `anchor build` from here.
 // ═══════════════════════════════════════════════════════════════════════════
 
 use anchor_lang::prelude::*;
@@ -34,8 +28,10 @@ const LP_LOCK_DURATION: i64 = 2 * 365 * 24 * 60 * 60; // 2 years in seconds
 const SOL_USD_FEED_ID_HEX: &str =
     "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
 
-// Reject Pyth prices older than this many seconds.
-const PYTH_MAX_STALENESS_SECS: u64 = 60;
+// Reject Pyth prices older than this many seconds. Kept tight to shrink the
+// window in which a caller can post the most favorable recent price (timing
+// arbitrage against the vault).
+const PYTH_MAX_STALENESS_SECS: u64 = 15;
 // Reject Pyth prices where confidence interval > 1% of price.
 const PYTH_MAX_CONF_BPS: u128 = 100;
 
@@ -51,6 +47,10 @@ fn read_sol_usd_price(price_update: &Account<PriceUpdateV2>) -> Result<(i64, i32
         .map_err(|_| error!(TobeError::StalePriceFeed))?;
 
     require!(price.price > 0, TobeError::NonPositivePrice);
+    // A reported confidence of 0 is degenerate (uninitialized / aggregation
+    // anomaly), not "perfectly precise" — reject it rather than letting the
+    // conf_bps check pass trivially.
+    require!(price.conf > 0, TobeError::PriceConfidenceTooWide);
 
     // conf / price <= PYTH_MAX_CONF_BPS / 10000
     let conf_bps = (price.conf as u128)
@@ -471,6 +471,10 @@ pub mod neco_token {
 
     pub fn set_pool_config(ctx: Context<SetPoolConfig>, tobe_is_token_0: bool) -> Result<()> {
         let mint_state = &mut ctx.accounts.mint_state;
+        // Must run AFTER seed_pool so the 30%-floor baseline (vault_tobe_at_config,
+        // set below) is captured against the post-seed vault_balance. Capturing it
+        // pre-seed would set the floor too high and could soft-lock flush.
+        require!(mint_state.pool_seeded, TobeError::PoolNotConfigured);
         require!(
             mint_state.raydium_pool_state == Pubkey::default(),
             TobeError::PoolAlreadyConfigured
