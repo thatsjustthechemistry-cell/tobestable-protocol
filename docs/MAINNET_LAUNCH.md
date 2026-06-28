@@ -124,7 +124,7 @@ Once `pool_sol_balance` ≥ 1 SOL. **Signature now takes `max_tobe_to_pair: u64`
 `sell_to_vault` (the $1 floor) is **disabled until TOBE first reaches $1** — a one-way latch that blocks the early below-peg drain. Once the market price reaches $1, anyone calls `arm_floor` to enable it permanently:
 - **Discriminator:** `cbf35c2766bfc696`, no args
 - Reads the pool vaults (validated against config) × Pyth SOL/USD; sets `floor_active = true` if TOBE/USD ≥ $1.
-- A `scripts/arm-floor.js` helper is the cleanest way to call it (TODO: add).
+- Run `node scripts/arm-floor.js` (use `--dry-run` first to confirm TOBE/USD ≥ $1 before sending).
 
 ## Admin instruction discriminators (for Realms proposals)
 
