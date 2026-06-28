@@ -187,6 +187,9 @@ describe("tobestable", () => {
     assert.equal(state.authority.toString(), authority.publicKey.toString());
     assert.equal(state.treasury.toString(), treasury.publicKey.toString());
     assert.equal(state.totalMinted.toNumber(), 0);
+    // Floor-activation latch (audit hardening): starts OFF; sell_to_vault is
+    // disabled until arm_floor latches it true once TOBE first reaches $1.
+    assert.equal(state.floorActive, false);
   });
 
   // ── 2. Mint Round 1 ──
@@ -240,6 +243,8 @@ describe("tobestable", () => {
 
     assert.equal(state.totalMinted.toNumber(), totalTokens);
     assert.equal(state.poolSolBalance.toNumber(), MINT_COST / 2);
+    // Minting must NOT arm the floor — only arm_floor (once TOBE ≥ $1) does.
+    assert.equal(state.floorActive, false);
   });
 
   // ── 3. Mint Round 2 ──
@@ -356,7 +361,17 @@ describe("tobestable", () => {
     const poolReserveAfter = await provider.connection.getBalance(poolSolReservePda);
     assert.equal(poolReserveAfter, 0, "Pool reserve should be empty after seeding");
 
-    console.log("  ✓ Pool seeded successfully");
+    // Audit fix #2: seed_pool must also zero the LOGICAL pool_sol_balance counter.
+    // Before the fix it stayed ~5 SOL ahead of the drained physical reserve,
+    // permanently bricking flush_lp_to_raydium (it would try to move SOL that
+    // no longer existed).
+    assert.equal(
+      stateAfter.poolSolBalance.toNumber(),
+      0,
+      "pool_sol_balance must reset to 0 on seed (audit fix #2)"
+    );
+
+    console.log("  ✓ Pool seeded successfully (pool_sol_balance reset verified)");
   });
 
   // ── 6. Reject Second Seed Pool ──
@@ -436,13 +451,25 @@ describe("tobestable", () => {
   // instructions: `buyFromVault` (SOL → TOBE @ $1) and `sellToVault` (TOBE → SOL @ $1).
   // Both read Pyth SOL/USD. Localnet has no Pyth, so these tests run on devnet.
 
+  // These require real Pyth (and, for flush/arm_floor, real Raydium) accounts
+  // that don't exist on localnet, so they can't run under `anchor test`. Use the
+  // devnet scripts: scripts/devnet-buy-from-vault.js, scripts/devnet-sell-to-vault.js,
+  // scripts/devnet-set-pool-config-and-flush.js, scripts/arm-floor.js.
+
   it.skip("buy_from_vault: caller pays SOL, receives TOBE at $1 (devnet)", async () => {
-    // Run on devnet with real Pyth SOL/USD feed pubkey passed at initialize.
-    // Expected: caller's TOBE balance += sol_in * sol_usd_price; treasury gains SOL.
+    // scripts/devnet-buy-from-vault.js. Expected: TOBE += sol_in*price; treasury gains SOL.
   });
 
-  it.skip("sell_to_vault: caller deposits TOBE, receives SOL at $1 from vault_sol_reserve (devnet)", async () => {
-    // Run on devnet. Expected: vault_sol_reserve drains by tobe_in / sol_usd_price.
+  it.skip("sell_to_vault: caller deposits TOBE, receives SOL at $1 (devnet)", async () => {
+    // scripts/devnet-sell-to-vault.js. Covers audit fix #1 (the SOL payout now uses a
+    // PDA-signed system_program::transfer, not a forbidden direct lamport debit).
+    // PRECONDITION: floor must be armed first (arm_floor once TOBE ≥ $1), else the
+    // call reverts with FloorNotActive. Expected: vault_sol_reserve drains by
+    // tobe_in / price; seller's SOL balance rises; vault_balance += tobe_in.
+  });
+
+  it.skip("sell_to_vault rejects when floor not armed — FloorNotActive (devnet)", async () => {
+    // Before arm_floor: sell_to_vault must revert with FloorNotActive (the latch).
   });
 
   it.skip("buy_from_vault rejects when oracle price is stale (devnet)", async () => {
@@ -451,6 +478,13 @@ describe("tobestable", () => {
 
   it.skip("sell_to_vault rejects when vault_sol_reserve has insufficient SOL (devnet)", async () => {
     // Drain vault_sol then attempt sell; expect VaultSolInsufficient.
+  });
+
+  it.skip("flush_lp_to_raydium: deposits + burns LP, returns wSOL residual to reserve (devnet)", async () => {
+    // scripts/devnet-set-pool-config-and-flush.js. Covers audit fixes #4 (slippage
+    // bound), #6 (measured vault_balance delta), and CPI-1 (unconsumed wSOL returns
+    // to pool_sol_reserve, not the caller). Expected: LP burned; pool_sol_balance
+    // reflects only the unconsumed residual; vault_balance drops by measured TOBE.
   });
 
   // ── 10. Pause ──
