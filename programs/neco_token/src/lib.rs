@@ -127,6 +127,7 @@ pub mod neco_token {
         mint_state.raydium_token_1_vault = Pubkey::default();
         mint_state.tobe_is_token_0 = false;
         mint_state.vault_tobe_at_config = 0;
+        mint_state.floor_active = false;
 
         // Create token metadata via Metaplex CPI (manual instruction)
         let name = "TOBESTABLE".to_string();
@@ -344,6 +345,10 @@ pub mod neco_token {
     /// Bought TOBE returns to vault to replenish the upside-cap reserve.
     pub fn sell_to_vault(ctx: Context<SellToVault>, tobe_in_raw: u64) -> Result<()> {
         require!(!ctx.accounts.mint_state.paused, TobeError::MintingPaused);
+        // The $1 floor stays disabled until TOBE has first reached $1 (latched on
+        // by arm_floor). Before that, selling to the vault at $1 would be a pure
+        // below-peg drain (mint cost is far under $1), so it is blocked.
+        require!(ctx.accounts.mint_state.floor_active, TobeError::FloorNotActive);
         require!(tobe_in_raw > 0, TobeError::ZeroAmount);
 
         let (price, exponent) = read_sol_usd_price(&ctx.accounts.pyth_price_update)?;
@@ -392,6 +397,51 @@ pub mod neco_token {
         msg!(
             "sell_to_vault: {} TOBE → {} lamports @ $1 (SOL/USD price={}, exp={})",
             tobe_in_raw, sol_out, price, exponent
+        );
+        Ok(())
+    }
+
+    /// Permissionless one-way latch: arms the $1 floor (enables sell_to_vault)
+    /// the first time TOBE's market price reaches $1. TOBE/USD is derived from
+    /// the Raydium pool reserves × the Pyth SOL/USD price. Once set, floor_active
+    /// stays true forever.
+    ///
+    /// NOTE: this reads the pool's SPOT reserves, which are manipulable. Early on
+    /// this is self-limiting — pushing the pool to $1 costs far more than the tiny
+    /// reserve yields — but it is not a TWAP. A future hardening could require a
+    /// time-averaged price. Documented in docs/SELF_AUDIT.md.
+    pub fn arm_floor(ctx: Context<ArmFloor>) -> Result<()> {
+        let mint_state = &mut ctx.accounts.mint_state;
+        require!(
+            mint_state.raydium_pool_state != Pubkey::default(),
+            TobeError::PoolNotConfigured
+        );
+        require!(!mint_state.floor_active, TobeError::FloorAlreadyActive);
+
+        let (pool_tobe, pool_sol) = if mint_state.tobe_is_token_0 {
+            (
+                ctx.accounts.raydium_token_0_vault.amount,
+                ctx.accounts.raydium_token_1_vault.amount,
+            )
+        } else {
+            (
+                ctx.accounts.raydium_token_1_vault.amount,
+                ctx.accounts.raydium_token_0_vault.amount,
+            )
+        };
+        require!(pool_tobe > 0 && pool_sol > 0, TobeError::EmptyPoolReserves);
+
+        // TOBE/USD ≥ $1  ⇔  the USD value of the pool's SOL, expressed in TOBE at
+        // $1/TOBE, is at least the number of TOBE in the pool. (Both legs are
+        // 9-decimal, so the scale cancels; we reuse the audited price helper.)
+        let (price, exponent) = read_sol_usd_price(&ctx.accounts.pyth_price_update)?;
+        let tobe_at_one_usd = lamports_to_tobe_at_one_usd(pool_sol, price, exponent)?;
+        require!(tobe_at_one_usd >= pool_tobe, TobeError::PriceBelowPeg);
+
+        mint_state.floor_active = true;
+        msg!(
+            "Floor armed: TOBE reached $1 (pool_tobe={}, pool_sol={}, sol_usd={}e{})",
+            pool_tobe, pool_sol, price, exponent
         );
         Ok(())
     }
@@ -1098,6 +1148,24 @@ pub struct SellToVault<'info> {
 }
 
 #[derive(Accounts)]
+pub struct ArmFloor<'info> {
+    pub caller: Signer<'info>,
+
+    #[account(mut, seeds = [b"mint_state"], bump)]
+    pub mint_state: Account<'info, MintState>,
+
+    /// Pool vaults are validated against the recorded pool config so the price
+    /// read cannot be spoofed with unrelated token accounts.
+    #[account(constraint = raydium_token_0_vault.key() == mint_state.raydium_token_0_vault @ TobeError::PoolMismatch)]
+    pub raydium_token_0_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(constraint = raydium_token_1_vault.key() == mint_state.raydium_token_1_vault @ TobeError::PoolMismatch)]
+    pub raydium_token_1_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    pub pyth_price_update: Account<'info, PriceUpdateV2>,
+}
+
+#[derive(Accounts)]
 pub struct SeedPool<'info> {
     #[account(mut, constraint = authority.key() == mint_state.authority @ TobeError::Unauthorized)]
     pub authority: Signer<'info>,
@@ -1424,6 +1492,9 @@ pub struct MintState {
     pub raydium_token_1_vault: Pubkey,     // 32 — pool's vault for token_1
     pub tobe_is_token_0: bool,             // 1  — true if TOBE is token_0 in the pool
     pub vault_tobe_at_config: u64,         // 8  — vault balance baseline for floor protection
+    pub floor_active: bool,                // 1  — one-way latch: sell_to_vault floor is disabled
+                                           //      until TOBE first reaches $1 (see arm_floor),
+                                           //      preventing the early below-$1 drain arbitrage
 }
 
 // ─── Errors ───
@@ -1487,6 +1558,12 @@ pub enum TobeError {
     EmptyPoolReserves,
     #[msg("Flush slippage exceeded: required TOBE exceeds caller's max_tobe_to_pair")]
     SlippageExceeded,
+    #[msg("The $1 floor is not active yet; it arms once TOBE first reaches $1 (call arm_floor)")]
+    FloorNotActive,
+    #[msg("The $1 floor is already active")]
+    FloorAlreadyActive,
+    #[msg("TOBE market price is below $1; cannot arm the floor yet")]
+    PriceBelowPeg,
 }
 
 #[cfg(test)]

@@ -53,6 +53,29 @@
 - Adversarial verifiers for findings #4/#6/#7/#9 were also cut off; #4 was confirmed by hand, #6/#7 stand on reviewer analysis + author review.
 - No fuzzing / property testing was performed. The Pyth math has unit tests (`pyth_math_tests`); the vault/flush state machine does not.
 
+## Post-audit hardening: $1 floor activation latch
+
+Beyond the audit findings, a design change was added to cut the **largest early
+abuse vector** — the gap between mint cost (~$0.0036/TOBE early) and the $1 floor,
+which made `sell_to_vault` a ~275x below-peg drain before TOBE ever legitimately
+reached $1.
+
+**Mechanism.** New one-way state flag `floor_active` (default `false`). `sell_to_vault`
+now requires `floor_active == true`. A new permissionless instruction `arm_floor`
+sets it true the first time TOBE's market price reaches $1, where TOBE/USD is
+derived from the Raydium pool reserves × the Pyth SOL/USD price (reusing the
+audited `lamports_to_tobe_at_one_usd` helper). Once armed it stays armed forever.
+
+**Effect.** Before TOBE first hits $1, the floor cannot be used at all, so the
+early below-peg drain is impossible. After it arms, the floor behaves as the
+(still reserve-bounded) backstop described above.
+
+**Known limitation.** `arm_floor` reads the pool's **spot** reserves, which are
+manipulable. Early on this is self-limiting (pushing the pool to $1 costs far more
+than the tiny reserve yields), and the read vaults are constrained to the recorded
+pool config. It is **not** a TWAP — a determined actor could spike the spot price
+to arm the latch once. A future hardening could require a time-averaged price.
+
 ## Recommended follow-ups
 1. Re-run the `cpi-token` reviewer + a focused review of the Raydium CPI account set.
 2. Cross-derive `token_0/1_vault` from `pool_state` in `set_pool_config` (completes #8).
