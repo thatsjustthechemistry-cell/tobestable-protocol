@@ -498,7 +498,7 @@ pub mod neco_token {
         Ok(())
     }
 
-    pub fn flush_lp_to_raydium(ctx: Context<FlushLpToRaydium>) -> Result<()> {
+    pub fn flush_lp_to_raydium(ctx: Context<FlushLpToRaydium>, max_tobe_to_pair: u64) -> Result<()> {
         const FLUSH_MIN_LAMPORTS: u64 = 1_000_000_000; // 1 SOL
         const VAULT_FLOOR_BPS: u128 = 3000; // 30%
 
@@ -543,6 +543,13 @@ pub mod neco_token {
             .ok_or(TobeError::MathOverflow)?
             .try_into()
             .map_err(|_| error!(TobeError::MathOverflow))?;
+
+        // Slippage / sandwich protection: tobe_to_pair is derived from the LIVE
+        // (attacker-influenceable) pool ratio. An honest keeper passes a
+        // max_tobe_to_pair computed off-chain from current reserves; if someone
+        // front-runs to skew the ratio, the required TOBE exceeds that bound and
+        // we revert rather than deposit at a manipulated ratio.
+        require!(tobe_to_pair <= max_tobe_to_pair, TobeError::SlippageExceeded);
 
         // Floor protection
         let floor: u64 = ((mint_state.vault_tobe_at_config as u128)
@@ -605,8 +612,13 @@ pub mod neco_token {
                 ctx.accounts.vault_token_account.to_account_info(),
             )
         };
-        let max_tobe = mint_state.vault_balance;
+        // Cap the TOBE Raydium may pull at the caller's slippage bound, so even a
+        // skewed ratio cannot drain more than tolerated.
+        let max_tobe = mint_state.vault_balance.min(max_tobe_to_pair);
         let max_sol = sol_to_deposit;
+        // Snapshot real vault TOBE before the deposit so we can decrement state by
+        // the ACTUAL amount Raydium consumed, not a pre-CPI estimate (#6).
+        let vault_tobe_before = ctx.accounts.vault_token_account.amount;
         let (max_token_0, max_token_1) = if mint_state.tobe_is_token_0 {
             (max_tobe, max_sol)
         } else {
@@ -657,7 +669,7 @@ pub mod neco_token {
             lp_received,
         )?;
 
-        // 6. Close wsol_temp, return rent to caller
+        // 6. Close wsol_temp and the (now-empty) lp_receipt, returning rent to caller
         token::close_account(CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             token::CloseAccount {
@@ -667,17 +679,32 @@ pub mod neco_token {
             },
             vault_signer,
         ))?;
+        token::close_account(CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            token::CloseAccount {
+                account: ctx.accounts.lp_receipt.to_account_info(),
+                destination: ctx.accounts.caller.to_account_info(),
+                authority: ctx.accounts.vault_authority.to_account_info(),
+            },
+            vault_signer,
+        ))?;
 
-        // 7. Update state
+        // 7. Update state. Decrement vault_balance by the TOBE Raydium ACTUALLY
+        //    consumed (measured), so the counter stays equal to the real token
+        //    account balance — never drifts off a pre-CPI estimate (#6).
+        ctx.accounts.vault_token_account.reload()?;
+        let tobe_spent = vault_tobe_before
+            .checked_sub(ctx.accounts.vault_token_account.amount)
+            .ok_or(TobeError::MathOverflow)?;
         mint_state.pool_sol_balance = 0;
         mint_state.vault_balance = mint_state
             .vault_balance
-            .checked_sub(tobe_to_pair)
+            .checked_sub(tobe_spent)
             .ok_or(TobeError::MathOverflow)?;
 
         msg!(
             "Flush: deposited {} TOBE + {} lamports → {} LP burned",
-            tobe_to_pair,
+            tobe_spent,
             sol_to_deposit,
             lp_received,
         );
@@ -1456,6 +1483,8 @@ pub enum TobeError {
     LpAmountZero,
     #[msg("Pool reserves are empty; cannot compute deposit ratio")]
     EmptyPoolReserves,
+    #[msg("Flush slippage exceeded: required TOBE exceeds caller's max_tobe_to_pair")]
+    SlippageExceeded,
 }
 
 #[cfg(test)]
