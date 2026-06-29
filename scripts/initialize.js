@@ -60,6 +60,11 @@ async function main() {
       lpLockAuthority:      lpLockAuthority,
       metadata:             metadata,
       tokenMetadataProgram: MPL_TOKEN_METADATA_ID,
+      program:              PROGRAM_ID,
+      programData:          PublicKey.findProgramAddressSync(
+        [PROGRAM_ID.toBuffer()],
+        new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111")
+      )[0],
       tokenProgram:         new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
       systemProgram:        anchor.web3.SystemProgram.programId,
       rent:                 anchor.web3.SYSVAR_RENT_PUBKEY,

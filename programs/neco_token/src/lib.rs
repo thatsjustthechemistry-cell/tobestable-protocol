@@ -532,6 +532,28 @@ pub mod neco_token {
             TobeError::PoolAlreadyConfigured
         );
 
+        // Cross-check the recorded accounts against the typed pool so the config
+        // is trustworthy by construction (defense-in-depth vs an authority typo):
+        // the vaults + lp_mint must belong to THIS pool, both legs must be
+        // 9-decimal, and the legs must be exactly TOBE and native wSOL — the
+        // 9-decimal assumption arm_floor's price math relies on (its decimals
+        // cancel in the ratio). This makes the floor-price source sound and
+        // removes the one-way config-typo DoS risk for flush.
+        {
+            let pool = ctx.accounts.raydium_pool_state.load()?;
+            require!(ctx.accounts.raydium_token_0_vault.key() == pool.token_0_vault, TobeError::PoolMismatch);
+            require!(ctx.accounts.raydium_token_1_vault.key() == pool.token_1_vault, TobeError::PoolMismatch);
+            require!(ctx.accounts.raydium_lp_mint.key() == pool.lp_mint, TobeError::PoolMismatch);
+            require!(pool.mint_0_decimals == 9 && pool.mint_1_decimals == 9, TobeError::PoolMismatch);
+            let (tobe_leg, wsol_leg) = if tobe_is_token_0 {
+                (pool.token_0_mint, pool.token_1_mint)
+            } else {
+                (pool.token_1_mint, pool.token_0_mint)
+            };
+            require!(tobe_leg == mint_state.tobe_mint, TobeError::PoolMismatch);
+            require!(wsol_leg == anchor_spl::token::spl_token::native_mint::ID, TobeError::PoolMismatch);
+        }
+
         mint_state.raydium_pool_state = ctx.accounts.raydium_pool_state.key();
         mint_state.raydium_pool_authority = ctx.accounts.raydium_pool_authority.key();
         mint_state.raydium_lp_mint = ctx.accounts.raydium_lp_mint.key();
@@ -1047,6 +1069,15 @@ pub struct Initialize<'info> {
     /// CHECK: Metaplex Token Metadata Program
     #[account(address = MPL_TOKEN_METADATA_ID)]
     pub token_metadata_program: UncheckedAccount<'info>,
+
+    // Bind initialize to the program's upgrade authority so the one-shot init
+    // (which sets authority + treasury) cannot be front-run by anyone else in
+    // the deploy window. Only the wallet that deployed/upgrades this program can
+    // initialize it.
+    #[account(constraint = program.programdata_address()? == Some(program_data.key()) @ TobeError::Unauthorized)]
+    pub program: Program<'info, crate::program::NecoToken>,
+    #[account(constraint = program_data.upgrade_authority_address == Some(authority.key()) @ TobeError::Unauthorized)]
+    pub program_data: Account<'info, ProgramData>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,

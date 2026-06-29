@@ -44,7 +44,7 @@ anchor deploy --provider.cluster mainnet
 node scripts/mainnet-initialize.js
 ```
 
-**Cost:** ~0.05 SOL. **Effect:** creates state PDA + vault PDAs + Metaplex metadata, generates the TOBE mint, saves the mint keypair to `scripts/.mainnet-mint.json`.
+**Cost:** ~0.05 SOL. **Must be run by the deploy wallet** — `initialize` is bound in-code to the program's upgrade authority (RA-1 fix), so only the deployer can initialize; this closes the deploy-window front-run. **Effect:** creates state PDA + vault PDAs + Metaplex metadata, generates the TOBE mint, saves the mint keypair to `scripts/.mainnet-mint.json`.
 **➡️ BACK UP `scripts/.mainnet-mint.json`** (and note the printed mint_state PDA + TOBE mint pubkey — needed below).
 
 ## Step 3 — Move treasury to the Realms vault

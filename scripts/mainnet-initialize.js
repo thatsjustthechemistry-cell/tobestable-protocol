@@ -98,6 +98,10 @@ async function main() {
     [Buffer.from('metadata'), MPL_TOKEN_METADATA_ID.toBuffer(), tobeMint.publicKey.toBuffer()],
     MPL_TOKEN_METADATA_ID,
   );
+  // Program-data PDA (BPF Upgradeable Loader) — initialize is bound to the
+  // program's upgrade authority, so the signer must be the deployer.
+  const BPF_UPGRADEABLE_LOADER = new PublicKey('BPFLoaderUpgradeab1e11111111111111111111111');
+  const [programDataPda] = PublicKey.findProgramAddressSync([PROGRAM_ID.toBuffer()], BPF_UPGRADEABLE_LOADER);
 
   console.log('\nDerived PDAs:');
   console.log('  mint_state:        ', mintStatePda.toBase58());
@@ -127,6 +131,8 @@ async function main() {
       lpLockAuthority: lpLockAuthorityPda,
       metadata: metadataPda,
       tokenMetadataProgram: MPL_TOKEN_METADATA_ID,
+      program: PROGRAM_ID,
+      programData: programDataPda,
       tokenProgram: TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
       rent: SYSVAR_RENT_PUBKEY,

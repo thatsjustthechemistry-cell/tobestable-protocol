@@ -98,6 +98,38 @@ pool's accrued-fee ratio).
 (protocol PDA) instead of `caller`, and set `pool_sol_balance` to the measured
 residual so it rolls forward — mirroring the TOBE-side reconciliation.
 
+## Final pre-launch re-audit (round 3)
+
+A full re-audit of the post-fix code (5 reviewers + adversarial verification)
+confirmed **all prior fixes are correct and complete, with no regressions**, and
+**no Critical/High** issues. The flush SOL/TOBE reconciliation, the seed_pool
+counter reset, the pause gating, the floor latch, and the Pyth hardening were all
+independently verified sound. Four residual items, three fixed here:
+
+**RA-1 (Medium, fixed): unprotected initializer.** `initialize` set
+`authority` + `treasury` from caller args with no binding to the deployer, so it
+could be front-run in the deploy window (whoever lands `initialize` first owns the
+program + treasury).
+*Fix:* `Initialize` now requires the signer to be the program's **upgrade
+authority** (`program_data.upgrade_authority_address == authority`), closing the
+window entirely. Init scripts + the localnet test pass the `program`/`program_data`
+accounts.
+
+**RA-3 / RA-4 (Low/Info, fixed): unvalidated pool config.** `set_pool_config`
+recorded the Raydium vaults / lp_mint from `UncheckedAccount`s without proving
+they belong to the typed `pool_state`, and `arm_floor`'s price math assumed both
+pool legs are 9-decimal without enforcing it.
+*Fix:* `set_pool_config` now cross-checks the vaults + lp_mint against the loaded
+`PoolState`, and requires both legs to be 9-decimal and to be exactly TOBE and
+native wSOL. This makes the floor-price source sound by construction and removes
+the config-typo DoS risk.
+
+**RA-2 (Low, accepted): wsol_temp rent dust.** Each flush strands ~0.002 SOL of
+`wsol_temp` rent in `pool_sol_reserve` (it ends up in the protocol's own reserve,
+just not injected into LP). Benign and in the *safe* direction (physical reserve
+≥ logical `pool_sol_balance` always holds — no overdraw). Left as-is rather than
+modify audited-correct flush accounting for protocol-owned dust.
+
 ## Recommended follow-ups
 1. Re-run the `cpi-token` reviewer + a focused review of the Raydium CPI account set.
 2. Cross-derive `token_0/1_vault` from `pool_state` in `set_pool_config` (completes #8).

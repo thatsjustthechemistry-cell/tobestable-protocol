@@ -94,6 +94,11 @@ async function main() {
         lpLockAuthority: lpLockAuthorityPda,
         metadata: metadataPda,
         tokenMetadataProgram: MPL_TOKEN_METADATA_ID,
+        program: PROGRAM_ID,
+        programData: PublicKey.findProgramAddressSync(
+          [PROGRAM_ID.toBuffer()],
+          new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111")
+        )[0],
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
         rent: SYSVAR_RENT_PUBKEY,
