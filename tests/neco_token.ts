@@ -168,6 +168,11 @@ describe("tobestable", () => {
         lpLockAuthority: lpLockAuthorityPda,
         metadata: metadataPda,
         tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
+        program: program.programId,
+        programData: anchor.web3.PublicKey.findProgramAddressSync(
+          [program.programId.toBuffer()],
+          new anchor.web3.PublicKey("BPFLoaderUpgradeab1e11111111111111111111111")
+        )[0],
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
         rent: anchor.web3.SYSVAR_RENT_PUBKEY,
