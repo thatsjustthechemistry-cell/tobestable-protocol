@@ -40,7 +40,7 @@ Pyth `PriceUpdateV2` is validated on every call:
 | `mint_tobe` | Anyone | Pay 10 SOL → 50% TOBE to caller, 50% to vault, 5/5 SOL split to reserves |
 | `buy_from_vault` | Anyone | SOL in → TOBE out @ $1 (caps price). SOL → authority |
 | `sell_to_vault` | Anyone | TOBE in → SOL out @ $1 (defends floor) |
-| `seed_pool` | Authority (one-time) | Bootstrap external Raydium pool with round 1 vault TOBE |
+| `arm_floor` | Authority only | Latch the $1 floor on once TOBE reaches $1 (H1 fix; `seed_pool` removed) |
 | `lock_lp` / `unlock_lp` | Authority | 2-year LP token timelock |
 | `pause` / `unpause` | Authority | Emergency mint halt |
 | `propose_authority` / `accept_authority` | Authority / new authority | 2-step ownership transfer |

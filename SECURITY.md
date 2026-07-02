@@ -22,7 +22,7 @@ Each round costs **10 SOL** and mints a decreasing number of TOBE tokens.
 | `set_pool_config`        | Authority (once)            | Records Raydium pool addresses on-chain after authority creates the pool externally.  |
 | `flush_lp_to_raydium`    | Anyone                      | When ≥1 SOL pending: deposits accumulated SOL + matching TOBE into Raydium pool, **burns LP tokens permanently** in same tx. |
 | `migrate_state_v2`       | Authority (one-time)        | Reallocates `mint_state` PDA to fit Phase 2 fields; idempotent (no-op if already at v2 size). |
-| `seed_pool`              | Authority (legacy, one-time)| Hands round-1 vault TOBE + accumulated pool SOL to authority for off-chain pool creation. Superseded by `flush_lp_to_raydium` for ongoing deepening. |
+| `arm_floor`              | Authority only (H1 fix)     | One-way latch enabling `sell_to_vault` (the $1 floor) once TOBE reaches $1. Authority-gated so the manipulable pool spot-price check cannot be flash-gamed to arm the floor early. (`seed_pool` was **removed** — M1 fix: it was a legacy authority fund-movement primitive unused by the fair launch.) |
 | `update_treasury`        | Authority only              | Changes destination wallet for `buy_from_vault` arbitrage proceeds.                   |
 | `pause`                  | Authority only              | Stops all minting (emergency).                                                         |
 | `unpause`                | Authority only              | Resumes minting.                                                                       |

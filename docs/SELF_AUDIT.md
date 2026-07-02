@@ -135,3 +135,22 @@ modify audited-correct flush accounting for protocol-owned dust.
 2. Cross-derive `token_0/1_vault` from `pool_state` in `set_pool_config` (completes #8).
 3. Add integration tests for the now-fixed `sell_to_vault` floor and post-seed `flush`.
 4. Consider a free static pass (Sec3 X-Ray, `cargo-audit`) and community review before launch.
+
+---
+
+## Round 4: Fable 5 adversarial audit (2 findings fixed)
+
+A fresh independent audit (Claude Fable 5, whole-program read + adversarial verification) surfaced two issues. Both are now fixed.
+
+| # | Severity | Finding | Status |
+|---|----------|---------|--------|
+| H1 | **High** | `arm_floor` was permissionless and gated the floor on a **manipulable pool SPOT ratio**. An attacker could flash-skew the pool across $1, latch `floor_active = true` permanently, then drain `vault_sol_reserve` via cheap-mint → `sell_to_vault` at $1. | ✅ Fixed |
+| M1 | **Medium** | `seed_pool` moved round-1 vault TOBE + the entire `pool_sol_reserve` to an **unconstrained destination** — an authority fund-movement primitive, not a pool-seed-only path. | ✅ Fixed (removed) |
+
+**H1 — arm_floor spot manipulation.** Round 2's "Known limitation" note accepted the spot-price manipulability as tolerable ("self-limiting early on"). Round 4 re-rated it **High**: the self-limiting argument is an *unenforced assumption about pool depth*, while `vault_sol_reserve` grows a fixed 5 SOL/round independent of pool depth — so if flushes lag or the pool is thin, arming can be cheaper than the reserve it unlocks, and the reserve is real user deposits.
+*Fix:* `arm_floor` is now **authority-only** (a 2-of-3 council multisig after migration). The on-chain spot check is retained as a *secondary* guard; the human/multisig confirms TOBE genuinely reached $1 (off-chain TWAP) before arming. This removes the permissionless flash-manipulation path entirely.
+
+**M1 — seed_pool unconstrained destination.** ⚠️ **Correction to the record:** Round 1's "Rejected by verification" section dismissed *"seed_pool can send vault TOBE to an arbitrary account"* as not real, reasoning that "the runtime prevents a mint mismatch." That reasoning was **incomplete** — the runtime enforces the *mint* of `pool_tobe_destination` (must be TOBE) but **not its owner**, so the authority could still direct round-1 vault TOBE to any TOBE account it controls, plus sweep the whole `pool_sol_reserve` to itself. The concern was real; the earlier rejection stands corrected.
+*Fix:* `seed_pool` and its `SeedPool` account struct were **removed** entirely. It was legacy and unused by the fair-launch flow (the community creates the pool externally; ongoing liquidity uses `flush_lp_to_raydium`), so removal eliminates the primitive with no functional loss. The vestigial `pool_seeded` field is retained (never read) to keep the on-chain account layout stable for already-migrated devnet state.
+
+**Verification:** `anchor build` passes clean after both changes. `arm-floor.js`, the launch runbook (Step 11), SECURITY.md, README.md, and the test suite were updated; the two `seed_pool` tests were removed.

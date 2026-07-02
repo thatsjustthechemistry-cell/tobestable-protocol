@@ -1,9 +1,15 @@
 // scripts/arm-floor.js
 //
-// Permissionless: arm the $1 floor (enables sell_to_vault) once TOBE has first
-// reached $1. Calls the program's `arm_floor` instruction, which checks
-// TOBE/USD (Raydium pool reserves × Pyth SOL/USD) >= $1 and latches
-// floor_active = true permanently.
+// AUTHORITY-ONLY (H1 fix): arm the $1 floor (enables sell_to_vault) once TOBE
+// has genuinely reached $1. Calls the program's `arm_floor` instruction, which
+// checks TOBE/USD (Raydium pool reserves × Pyth SOL/USD) >= $1 as a secondary
+// guard and latches floor_active = true permanently.
+//
+// arm_floor is no longer permissionless — the signer must be mint_state.authority.
+// AFTER the DAO migration the authority is the 2-of-3 Realms vault PDA, so real
+// arming is a COUNCIL PROPOSAL (like accept_authority / set_pool_config), not this
+// single-key script. Use this script's --dry-run to confirm TOBE >= $1 before the
+// council proposes; direct sending only works while authority is still a single key.
 //
 // Mainnet only — needs the Pyth SOL/USD pull oracle (same pattern as
 // scripts/devnet-buy-from-vault.js): fetch the latest update from Hermes, post
@@ -66,11 +72,21 @@ async function main() {
   const state = await program.account.mintState.fetch(mintStatePda);
 
   console.log("=== arm_floor pre-flight ===");
-  console.log("  Caller:           ", payer.publicKey.toBase58());
+  console.log("  Signer:           ", payer.publicKey.toBase58());
+  console.log("  Authority (req'd): ", state.authority.toBase58());
   console.log("  Program:          ", PROGRAM_ID.toBase58());
   console.log("  floor_active:     ", state.floorActive);
   console.log("  pool configured:  ", !state.raydiumPoolState.equals(PublicKey.default));
   console.log("  tobe_is_token_0:  ", state.tobeIsToken0);
+
+  const signerIsAuthority = payer.publicKey.equals(state.authority);
+  if (!signerIsAuthority) {
+    console.log(
+      "\n⚠️  Signer is NOT the on-chain authority. arm_floor is authority-only (H1 fix).\n" +
+      "    If authority is the Realms vault, arm via a 2-of-3 council proposal instead.\n" +
+      "    --dry-run still works for the price pre-flight below.",
+    );
+  }
 
   if (state.floorActive) {
     console.log("\nℹ️  Floor already armed. Nothing to do.");
@@ -115,6 +131,13 @@ async function main() {
     console.error("\n❌ TOBE is below $1 right now; arm_floor would revert. Aborting.");
     process.exit(1);
   }
+  if (!signerIsAuthority) {
+    console.error(
+      "\n❌ Signer is not the authority; arm_floor would revert (Unauthorized).\n" +
+      "   Arm via a 2-of-3 Realms council proposal, or run with the authority keypair.",
+    );
+    process.exit(1);
+  }
 
   // Post the Pyth update and consume it in arm_floor (same builder pattern as
   // devnet-buy-from-vault.js).
@@ -128,7 +151,7 @@ async function main() {
         instruction: await program.methods
           .armFloor()
           .accounts({
-            caller: payer.publicKey,
+            authority: payer.publicKey,
             mintState: mintStatePda,
             raydiumToken0Vault: state.raydiumToken0Vault,
             raydiumToken1Vault: state.raydiumToken1Vault,

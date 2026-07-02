@@ -372,7 +372,7 @@ pub mod neco_token {
         //    program (only ever funded via system_program::transfer), so lamports
         //    must leave via a PDA-signed system transfer — a program may not
         //    direct-mutate the lamports of an account it does not own. (Same
-        //    pattern as seed_pool / flush_lp_to_raydium for pool_sol_reserve.)
+        //    pattern as flush_lp_to_raydium for pool_sol_reserve.)
         let vault_sol_lamports = ctx.accounts.vault_sol_reserve.lamports();
         require!(vault_sol_lamports >= sol_out, TobeError::VaultSolInsufficient);
         let vault_sol_seeds: &[&[u8]] = &[b"vault_sol_reserve", &[ctx.bumps.vault_sol_reserve]];
@@ -401,15 +401,18 @@ pub mod neco_token {
         Ok(())
     }
 
-    /// Permissionless one-way latch: arms the $1 floor (enables sell_to_vault)
-    /// the first time TOBE's market price reaches $1. TOBE/USD is derived from
-    /// the Raydium pool reserves × the Pyth SOL/USD price. Once set, floor_active
+    /// Authority-gated one-way latch: arms the $1 floor (enables sell_to_vault)
+    /// once TOBE's market price has genuinely reached $1. Once set, floor_active
     /// stays true forever.
     ///
-    /// NOTE: this reads the pool's SPOT reserves, which are manipulable. Early on
-    /// this is self-limiting — pushing the pool to $1 costs far more than the tiny
-    /// reserve yields — but it is not a TWAP. A future hardening could require a
-    /// time-averaged price. Documented in docs/SELF_AUDIT.md.
+    /// SECURITY (H1 fix): arming is restricted to the authority — a 2-of-3 council
+    /// multisig after migration. The on-chain check below reads the Raydium pool
+    /// SPOT reserves × Pyth SOL/USD, which is manipulable within a single tx, so
+    /// it is kept ONLY as a secondary sanity guard, not the sole gate. The
+    /// human/multisig confirms TOBE truly reached $1 (e.g. via an off-chain TWAP)
+    /// before arming — that human gate is what prevents a premature-arm drain of
+    /// vault_sol_reserve. Previously permissionless, which let anyone flash-skew
+    /// the pool ratio across $1 and latch the floor early.
     pub fn arm_floor(ctx: Context<ArmFloor>) -> Result<()> {
         let mint_state = &mut ctx.accounts.mint_state;
         require!(
@@ -446,63 +449,15 @@ pub mod neco_token {
         Ok(())
     }
 
-    /// Seed the initial Raydium pool. Releases round 1's vault TOBE + pool SOL reserve.
-    /// Authority calls this once after round 1 to create the TOBE/SOL pool.
-    pub fn seed_pool(ctx: Context<SeedPool>) -> Result<()> {
-        let mint_state = &mut ctx.accounts.mint_state;
-        require!(!mint_state.paused, TobeError::MintingPaused);
-        require!(!mint_state.pool_seeded, TobeError::PoolAlreadySeeded);
-
-        // Round 1 vault tokens: 1024 * 1024 * 10^9 / 2 = 524,288,000,000,000
-        let round1_total = TOKENS_PER_UNIT
-            .checked_mul(MAX_ROUNDS)
-            .ok_or(TobeError::MathOverflow)?
-            .checked_mul(TOBE_DECIMALS_FACTOR)
-            .ok_or(TobeError::MathOverflow)?;
-        let round1_vault = round1_total / 2;
-
-        // Transfer TOBE from vault to pool destination
-        let vault_seeds = &[b"vault_authority".as_ref(), &[mint_state.vault_bump]];
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.vault_token_account.to_account_info(),
-                    to: ctx.accounts.pool_tobe_destination.to_account_info(),
-                    authority: ctx.accounts.vault_authority.to_account_info(),
-                },
-                &[vault_seeds],
-            ),
-            round1_vault,
-        )?;
-
-        // Transfer SOL from pool reserve PDA to authority
-        let sol_balance = ctx.accounts.pool_sol_reserve.lamports();
-        let pool_seeds = &[b"pool_sol_reserve".as_ref(), &[ctx.bumps.pool_sol_reserve]];
-        anchor_lang::system_program::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
-                anchor_lang::system_program::Transfer {
-                    from: ctx.accounts.pool_sol_reserve.to_account_info(),
-                    to: ctx.accounts.authority.to_account_info(),
-                },
-                &[pool_seeds],
-            ),
-            sol_balance,
-        )?;
-
-        mint_state.vault_balance = mint_state.vault_balance
-            .checked_sub(round1_vault)
-            .ok_or(TobeError::MathOverflow)?;
-        // seed_pool drains the entire physical pool_sol_reserve above, so the
-        // logical accumulator must be zeroed to stay in sync — otherwise
-        // flush_lp_to_raydium would later try to move more SOL than exists.
-        mint_state.pool_sol_balance = 0;
-        mint_state.pool_seeded = true;
-
-        msg!("Pool seeded: {} TOBE + {} lamports SOL", round1_vault, sol_balance);
-        Ok(())
-    }
+    // M1 fix: `seed_pool` was REMOVED. It was a legacy, fair-launch-unused
+    // authority primitive that handed round-1 vault TOBE (524,288) + the entire
+    // pool_sol_reserve to an unconstrained destination — effectively "move vault
+    // funds anywhere the authority chooses." The fair launch never calls it
+    // (community creates the pool externally), and ongoing liquidity deepening is
+    // handled by the permissionless, floor-protected flush_lp_to_raydium. Deleting
+    // it removes the primitive and the trust concern. The vestigial `pool_seeded`
+    // field is retained (never read now) to keep the on-chain account layout stable
+    // for the already-migrated devnet state.
 
     // ─── Phase 2: Raydium auto-LP injection ───
     //
@@ -521,12 +476,9 @@ pub mod neco_token {
 
     pub fn set_pool_config(ctx: Context<SetPoolConfig>, tobe_is_token_0: bool) -> Result<()> {
         let mint_state = &mut ctx.accounts.mint_state;
-        // NOT gated on pool_seeded: the fair-launch flow creates the Raydium pool
-        // externally (a community minter) and never calls seed_pool, so
-        // pool_seeded stays false. vault_tobe_at_config (the 30%-floor baseline,
-        // set below) is captured from the current vault_balance. If the optional
-        // founder-seed path (seed_pool) is ever used instead, call seed_pool
-        // BEFORE this so the baseline reflects the post-seed vault balance.
+        // The fair-launch flow creates the Raydium pool externally (a community
+        // minter). vault_tobe_at_config (the 30%-floor baseline, set below) is
+        // captured from the current vault_balance at config time.
         require!(
             mint_state.raydium_pool_state == Pubkey::default(),
             TobeError::PoolAlreadyConfigured
@@ -1194,7 +1146,12 @@ pub struct SellToVault<'info> {
 
 #[derive(Accounts)]
 pub struct ArmFloor<'info> {
-    pub caller: Signer<'info>,
+    // H1 fix: arming the $1 floor is authority-only (a 2-of-3 council multisig
+    // after migration). This removes the permissionless flash-manipulation path
+    // where anyone could skew the pool spot ratio across $1 and latch the floor
+    // early to unlock a vault_sol_reserve drain.
+    #[account(constraint = authority.key() == mint_state.authority @ TobeError::Unauthorized)]
+    pub authority: Signer<'info>,
 
     #[account(mut, seeds = [b"mint_state"], bump)]
     pub mint_state: Account<'info, MintState>,
@@ -1208,32 +1165,6 @@ pub struct ArmFloor<'info> {
     pub raydium_token_1_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
     pub pyth_price_update: Account<'info, PriceUpdateV2>,
-}
-
-#[derive(Accounts)]
-pub struct SeedPool<'info> {
-    #[account(mut, constraint = authority.key() == mint_state.authority @ TobeError::Unauthorized)]
-    pub authority: Signer<'info>,
-
-    #[account(mut, seeds = [b"mint_state"], bump)]
-    pub mint_state: Account<'info, MintState>,
-
-    /// CHECK: PDA vault authority
-    #[account(seeds = [b"vault_authority"], bump = mint_state.vault_bump)]
-    pub vault_authority: UncheckedAccount<'info>,
-
-    #[account(mut, seeds = [b"vault_token"], bump)]
-    pub vault_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
-
-    /// CHECK: PDA holding SOL for pool seeding
-    #[account(mut, seeds = [b"pool_sol_reserve"], bump)]
-    pub pool_sol_reserve: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    pub pool_tobe_destination: Box<InterfaceAccount<'info, TokenAccount>>,
-
-    pub token_program: Program<'info, Token>,
-    pub system_program: Program<'info, System>,
 }
 
 // ─── Phase 2: Raydium account structs ───

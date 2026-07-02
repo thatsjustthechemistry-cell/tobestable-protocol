@@ -1,7 +1,7 @@
 # Mainnet Launch Runbook
 
 > **Status:** Pre-launch reference. Execute step-by-step on launch day.
-> **Model:** Pure no-mint fair launch — no founder mints, no founder pool seeding. The community mints; the first minter (or anyone) creates the Raydium pool. `seed_pool` is NOT used.
+> **Model:** Pure no-mint fair launch — no founder mints, no founder pool seeding. The community mints; the first minter (or anyone) creates the Raydium pool. `seed_pool` has been **removed** (M1 audit fix — it was a legacy authority fund-movement primitive, unused by this flow).
 > **Audit:** Self-audited across all 8 vulnerability classes + a focused CPI/token re-audit; every confirmed finding fixed. See [`SELF_AUDIT.md`](./SELF_AUDIT.md). This is an AI-assisted self-audit, not a professional audit.
 
 ## Constants
@@ -12,7 +12,7 @@
 | Realms council vault (treasury + new authority) | `Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC` |
 | Realms council mint | `2ZdbLGkKi1Zvk5dKLqcY5UBcDdJVss8u2tGmMnN3gRHN` |
 | Realms threshold | 2-of-3 |
-| Council members | `Eis6SPak12JXqunZqLqgHneomygF1ouuoRk5PFXB5Bvf`, `8aVTS6eVvC33wZ4viwAfm6a9ZAXDXUKWvXtto4dFzquE`, `EnRAymUEDWkT5kdfSveUmNEwgfsA6Y53JVqTeSpYuiXo` |
+| Council members | `Eis6SPak12JXqunZqLqgHneomygF1ouuoRk5PFXB5Bvf`, `8aVTS6eVvC9VjP6pKsvHqgJfH2i7VwF8YMCvafp9vwH2`, `EnRAymUEDWkT5kdfSveUmNEwgfsA6Y53JVqTeSpYuiXo` |
 | Deployer wallet | `BzvTL4PYZzBPs51jmd2LwMYeDDbu319XmHrDLJFEuZzh` (yours; verify `solana address`) |
 | Program keypair | `target/deploy/neco_token-keypair.json` (LOCAL ONLY — back up!) |
 
@@ -104,7 +104,7 @@ The first minter (or anyone with TOBE) creates the TOBE/wSOL pool:
 ```bash
 TOBE_MINT=<mainnet TOBE mint from Step 2> node scripts/mainnet-create-raydium-pool.js
 ```
-Prints 5 pool addresses → `scripts/.mainnet-pool.json`. **No `seed_pool` is called — the pool is external.**
+Prints 5 pool addresses → `scripts/.mainnet-pool.json`. **The pool is external — `seed_pool` was removed (M1 audit fix).**
 
 ## Step 9 — Council proposal: `set_pool_config`
 
@@ -119,12 +119,13 @@ Records the pool + captures the 30%-floor baseline (`vault_tobe_at_config`) from
 
 Once `pool_sol_balance` ≥ 1 SOL. **Signature now takes `max_tobe_to_pair: u64`** (slippage bound) — a keeper computes it from current pool reserves + ~2% tolerance (see `scripts/devnet-set-pool-config-and-flush.js` for the calc). The frontend button supplies it. Deposits SOL+TOBE into Raydium and burns the LP (permanent liquidity); unconsumed wSOL returns to `pool_sol_reserve`.
 
-## Step 11 — Arm the $1 floor (permissionless, once TOBE reaches $1)
+## Step 11 — Arm the $1 floor (COUNCIL 2-of-3, once TOBE reaches $1)
 
-`sell_to_vault` (the $1 floor) is **disabled until TOBE first reaches $1** — a one-way latch that blocks the early below-peg drain. Once the market price reaches $1, anyone calls `arm_floor` to enable it permanently:
+`sell_to_vault` (the $1 floor) is **disabled until TOBE first reaches $1** — a one-way latch that blocks the early below-peg drain. Arming it is **authority-only (H1 audit fix)**: after migration the authority is the Realms vault, so this is a **2-of-3 council proposal**, not permissionless. This closes the flash-manipulation path where anyone could skew the pool spot ratio across $1 and latch the floor early to unlock a `vault_sol_reserve` drain.
 - **Discriminator:** `cbf35c2766bfc696`, no args
-- Reads the pool vaults (validated against config) × Pyth SOL/USD; sets `floor_active = true` if TOBE/USD ≥ $1.
-- Run `node scripts/arm-floor.js` (use `--dry-run` first to confirm TOBE/USD ≥ $1 before sending).
+- Custom instruction accounts: (1) `Cb7TsQF...` authority ✅ signer · (2) mint_state PDA ❌✅ writable · (3) `raydium_token_0_vault` · (4) `raydium_token_1_vault` · (5) Pyth SOL/USD price update (posted via Hermes)
+- On-chain it still reads the pool vaults × Pyth SOL/USD as a **secondary guard** (`floor_active = true` only if TOBE/USD ≥ $1), but the council's off-chain confirmation (a TWAP, not spot) is the real gate.
+- Pre-flight: `node scripts/arm-floor.js --dry-run` confirms TOBE/USD ≥ $1 before the council proposes.
 
 ## Admin instruction discriminators (for Realms proposals)
 
@@ -132,7 +133,7 @@ Once `pool_sol_balance` ≥ 1 SOL. **Signature now takes `max_tobe_to_pair: u64`
 |---|---|---|---|
 | `accept_authority` | `6b56c65b210c6ba0` | — | Step 5 |
 | `set_pool_config` | `d857417d716eb978` | `tobe_is_token_0: bool` | Step 9 |
-| `arm_floor` | `cbf35c2766bfc696` | — | Step 11 (permissionless) |
+| `arm_floor` | `cbf35c2766bfc696` | — | Step 11 (council 2-of-3, authority-only) |
 | `flush_lp_to_raydium` | `1324c3f558c78cd9` | `max_tobe_to_pair: u64` | Step 10 (permissionless) |
 | `update_treasury` | `3c10f342603bfe83` | `new_treasury: pubkey` | Redirect proceeds |
 | `pause` | `d316ddfb4a79c12f` | — | Emergency stop (now gates mint + all fund-moving ix) |
