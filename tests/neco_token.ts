@@ -319,89 +319,10 @@ describe("tobestable", () => {
     assert.equal(received, expectedMinter);
   });
 
-  // ── 5. Seed Pool ──
-
-  it("seeds the pool — transfers vault TOBE + pool SOL to authority", async () => {
-    const stateBefore = await program.account.mintState.fetch(mintStatePda);
-    const vaultBalanceBefore = stateBefore.vaultBalance.toNumber();
-
-    // Round 1 vault amount: 1024 * 1024 * 10^9 / 2
-    const round1Vault = (1024 * 1024 * TOBE_DECIMALS) / 2;
-
-    const authorityBalBefore = await provider.connection.getBalance(authority.publicKey);
-    const minterTobeBefore = await getAccount(provider.connection, minterTobe);
-
-    const tx = await program.methods
-      .seedPool()
-      .accounts({
-        authority: authority.publicKey,
-        mintState: mintStatePda,
-        vaultAuthority: vaultAuthorityPda,
-        vaultTokenAccount: vaultTokenPda,
-        poolSolReserve: poolSolReservePda,
-        poolTobeDestination: minterTobe,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
-      })
-      .rpc();
-
-    console.log("Seed pool tx:", tx);
-
-    const stateAfter = await program.account.mintState.fetch(mintStatePda);
-    assert.equal(stateAfter.poolSeeded, true);
-    assert.equal(stateAfter.vaultBalance.toNumber(), vaultBalanceBefore - round1Vault);
-
-    // Authority received SOL from pool reserve
-    const authorityBalAfter = await provider.connection.getBalance(authority.publicKey);
-    assert.ok(authorityBalAfter > authorityBalBefore, "Authority should have received pool SOL");
-
-    // Destination received TOBE from vault
-    const minterTobeAfter = await getAccount(provider.connection, minterTobe);
-    assert.equal(
-      Number(minterTobeAfter.amount) - Number(minterTobeBefore.amount),
-      round1Vault
-    );
-
-    // Pool reserve should be drained
-    const poolReserveAfter = await provider.connection.getBalance(poolSolReservePda);
-    assert.equal(poolReserveAfter, 0, "Pool reserve should be empty after seeding");
-
-    // Audit fix #2: seed_pool must also zero the LOGICAL pool_sol_balance counter.
-    // Before the fix it stayed ~5 SOL ahead of the drained physical reserve,
-    // permanently bricking flush_lp_to_raydium (it would try to move SOL that
-    // no longer existed).
-    assert.equal(
-      stateAfter.poolSolBalance.toNumber(),
-      0,
-      "pool_sol_balance must reset to 0 on seed (audit fix #2)"
-    );
-
-    console.log("  ✓ Pool seeded successfully (pool_sol_balance reset verified)");
-  });
-
-  // ── 6. Reject Second Seed Pool ──
-
-  it("rejects second seed_pool call", async () => {
-    try {
-      await program.methods
-        .seedPool()
-        .accounts({
-          authority: authority.publicKey,
-          mintState: mintStatePda,
-          vaultAuthority: vaultAuthorityPda,
-          vaultTokenAccount: vaultTokenPda,
-          poolSolReserve: poolSolReservePda,
-          poolTobeDestination: minterTobe,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-        })
-        .rpc();
-      assert.fail("Should have rejected — pool already seeded");
-    } catch (err) {
-      assert.include(err.toString(), "PoolAlreadySeeded");
-      console.log("  ✓ Second seed_pool correctly rejected");
-    }
-  });
+  // ── 5 & 6. Seed Pool tests REMOVED (M1 audit fix) ──
+  // seed_pool was deleted: a legacy, fair-launch-unused authority primitive that
+  // moved round-1 vault TOBE + all pool SOL to an unconstrained destination.
+  // Ongoing liquidity is handled by the floor-protected flush_lp_to_raydium.
 
   // ── 7. Insufficient SOL ──
 
