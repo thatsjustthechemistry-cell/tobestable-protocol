@@ -23,6 +23,7 @@
 - [ ] **Fund council wallet** `8aVTS...` (currently 0 SOL) so it can pay fees to vote
 - [ ] **Council key isolation** — confirm the 3 council keys live on separate devices (or accept "bootstrap multisig" with a written 30-day hardening plan)
 - [ ] **Governance rehearsal on devnet** — `npm install @solana/spl-governance`, then run the full propose → vote → execute → verify cycle on a devnet realm using `scripts/propose-accept-authority.js`
+- [ ] **🔴 Upgrade-authority handoff rehearsed on devnet (Step 5.5)** — on devnet: `set-upgrade-authority` → the DAO's **Program Governance** account, then create + pass + **execute an actual program-upgrade proposal** via 2-of-3. Confirm the exact `<DAO_PROGRAM_GOVERNANCE>` target. A wrong target permanently bricks upgrades, so this MUST work on devnet before mainnet. **Both `mint_state.authority` (Step 5) AND the program upgrade authority (Step 5.5) must go to the DAO — shipping with single-key upgrade authority is the backdoor the FAQ says doesn't exist.**
 - [ ] **Build with the current toolchain** (the one that builds locally / in CI — do NOT pin an old Solana, it resurfaces the `edition2024` build failure)
 - [ ] Public announcement drafted
 - [ ] ≥1 day-one minter lined up (10 SOL each)
@@ -96,9 +97,29 @@ Custom instruction — Program `Eekx6ftd...`, data (hex) `6b56c65b210c6ba0`, acc
 | 2 | mint_state PDA | ❌ | ✅ |
 </details>
 
+## Step 5.5 — Transfer PROGRAM UPGRADE authority to the DAO (do NOT skip)
+
+> **Why this is its own step:** Step 5 handed off `mint_state.authority` (the app-level admin: `pause`, `update_treasury`, `set_pool_config`, `arm_floor`). That is a *different* power from the **BPF-loader program upgrade authority**, which by default is still the single deploy wallet `BzvTL4PY...`. Whoever holds the upgrade authority can **replace the entire program bytecode** — mint infinite TOBE, drain every vault, delete the 2-of-3 checks. Leaving it on a single key makes the DAO cosmetic and is the exact single-key backdoor the FAQ says does not exist. **Both authorities must land on the DAO.**
+
+Transfer the upgrade authority to the DAO so future upgrades require a 2-of-3 Realms **program-upgrade** proposal:
+
+```bash
+# Run by the CURRENT upgrade authority (the deploy wallet).
+solana program set-upgrade-authority Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX \
+  --new-upgrade-authority <DAO_PROGRAM_GOVERNANCE> --url mainnet-beta
+```
+
+**Verify:** `solana program show Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX --url mainnet-beta` → `Authority:` must equal the DAO governance.
+
+> ⚠️ **CRITICAL — a wrong target permanently bricks upgrades (worse than the backdoor).** `<DAO_PROGRAM_GOVERNANCE>` must be an account **Realms can actually sign for and execute an "Upgrade Program" proposal against** — typically a **Program Governance** account created in the Realms DAO (New → Program governance), NOT a random PDA and NOT the raw treasury vault unless you've confirmed Realms can upgrade through it. If you send upgrade authority to an account nobody can sign for, the program is **immutable forever** and the ~4.53 SOL rent is unrecoverable. **This MUST be rehearsed end-to-end on devnet** (transfer authority → create a program-upgrade proposal → 2-of-3 vote → execute an actual upgrade) BEFORE doing it on mainnet. Confirm the exact `<DAO_PROGRAM_GOVERNANCE>` address during that rehearsal.
+>
+> The **program keypair** (`neco_token-keypair.json`) is still required for upgrades — transferring upgrade authority does **not** remove that requirement. Keep it backed up offline.
+>
+> **Future:** once TOBE has run cleanly for a while and the code is battle-tested, the DAO can vote to make the program **immutable** (`set-upgrade-authority ... --final`) for maximal trustlessness. Do not do this now — you just fixed a High-severity finding (H1); keep the ability to patch bugs under the multisig first.
+
 ## Step 6 — 🟢 Fully fair-launched
 
-Authority = Realms multisig, treasury = Realms vault, vault empty, no pool yet. **Announce.** From here, admin instructions (`set_pool_config`, `pause`, `update_treasury`) require a 2-of-3 council proposal.
+Authority = Realms multisig (**both** `mint_state.authority` AND the program upgrade authority — see Step 5.5), treasury = Realms vault, vault empty, no pool yet. **Announce.** From here, admin instructions (`set_pool_config`, `pause`, `update_treasury`) require a 2-of-3 council proposal, and so do **program upgrades**.
 
 ## Step 7 — Community mints
 
