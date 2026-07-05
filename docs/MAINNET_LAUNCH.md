@@ -18,7 +18,7 @@
 
 ## Pre-launch checklist (do BEFORE Step 1)
 
-- [ ] **Fund deployer** `BzvTL4PY...` with **≥5 SOL** mainnet: `solana balance --url mainnet-beta` (deploy briefly needs ~2× the program rent)
+- [ ] **Fund deployer** `BzvTL4PY...` with **~6 SOL** mainnet: `solana balance --url mainnet-beta`. Deploy rent for the current 650 KB program is **~4.53 SOL** (recomputed 2026-07 — the program grew with Phase 2, so the old "3.4 SOL total" is stale). 6 SOL covers deploy + init + a failed-deploy retry with headroom; 5 SOL leaves almost no margin.
 - [ ] **Back up `target/deploy/neco_token-keypair.json`** to 2 offline locations (controls the program ID)
 - [ ] **Fund council wallet** `8aVTS...` (currently 0 SOL) so it can pay fees to vote
 - [ ] **Council key isolation** — confirm the 3 council keys live on separate devices (or accept "bootstrap multisig" with a written 30-day hardening plan)
@@ -36,7 +36,13 @@ anchor build
 anchor deploy --provider.cluster mainnet
 ```
 
-**Cost:** ~2.5–3.3 SOL (program rent). **Verify:** `solana program show Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX --url mainnet-beta`
+**Cost:** ~4.53 SOL (program rent for the 650 KB `.so`; locked in the ProgramData account, not burned — reclaimable only by `solana program close`, which destroys the program). **Verify:** `solana program show Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX --url mainnet-beta`
+
+**If the deploy fails partway** (network/timeout), the SOL is NOT lost — it sits in an orphaned buffer account. Reclaim it before retrying:
+```bash
+solana program show --buffers --url mainnet-beta   # find stranded buffers
+solana program close --buffers --url mainnet-beta  # refund them to your wallet
+```
 
 ## Step 2 — Initialize
 
@@ -151,12 +157,14 @@ Once `pool_sol_balance` ≥ 1 SOL. **Signature now takes `max_tobe_to_pair: u64`
 
 | Step | SOL | USD |
 |---|---|---|
-| 1 Deploy | ~2.5–3.3 | ~$175–230 |
+| 1 Deploy | ~4.53 | ~$317 |
 | 2 Initialize | ~0.05 | ~$3.50 |
 | 3 Update treasury | <0.01 | — |
 | 4 Propose authority | <0.01 | — |
 | 5 Accept (council) | <0.01 | from council deposits |
-| **Your total (steps 1–4)** | **~3.4 SOL** | **~$240** |
+| **Your total (steps 1–4)** | **~4.6 SOL** | **~$322** |
+
+> **Fund ~6 SOL** (not the bare ~4.6) so a failed first deploy can be reclaimed + retried without stranding you. The ~4.53 SOL deploy cost is locked rent keeping the program alive, not a burn — only tx fees (pennies) are truly spent. The one real loss vector is losing `neco_token-keypair.json` (then the rent is unrecoverable) — back it up offline first.
 
 Pool seed (Step 8) + `set_pool_config` (Step 9) are paid by the community minter / council.
 
