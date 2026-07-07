@@ -48,10 +48,12 @@ solana program close --buffers --url mainnet-beta  # refund them to your wallet
 ## Step 2 — Initialize
 
 ```bash
-node scripts/mainnet-initialize.js
+# --founder sets the wallet that receives 50% of buy_from_vault proceeds
+# (disclosed founder fee). Defaults to the signer if omitted.
+node scripts/mainnet-initialize.js [--founder <FOUNDER_WALLET>]
 ```
 
-**Cost:** ~0.05 SOL. **Must be run by the deploy wallet** — `initialize` is bound in-code to the program's upgrade authority (RA-1 fix), so only the deployer can initialize; this closes the deploy-window front-run. **Effect:** creates state PDA + vault PDAs + Metaplex metadata, generates the TOBE mint, saves the mint keypair to `scripts/.mainnet-mint.json`.
+**Cost:** ~0.05 SOL. **Must be run by the deploy wallet** — `initialize` is bound in-code to the program's upgrade authority (RA-1 fix), so only the deployer can initialize; this closes the deploy-window front-run. **Effect:** creates state PDA + vault PDAs + Metaplex metadata, generates the TOBE mint, saves the mint keypair to `scripts/.mainnet-mint.json`, and sets the **founder revenue wallet** (50% of `buy_from_vault` proceeds; the other 50% goes to `treasury` set in Step 3). Founder is changeable later via `update_founder` (authority/council).
 **➡️ BACK UP `scripts/.mainnet-mint.json`** (and note the printed mint_state PDA + TOBE mint pubkey — needed below).
 
 ## Step 3 — Move treasury to the Realms vault
@@ -60,7 +62,7 @@ node scripts/mainnet-initialize.js
 node scripts/mainnet-update-treasury.js
 ```
 
-**Effect:** `mint_state.treasury` → `Cb7TsQF...`. Do it now (single-sig) so arbitrage proceeds flow to the DAO before authority handoff.
+**Effect:** `mint_state.treasury` → `Cb7TsQF...`. Do it now (single-sig) so the **DAO's 50%** of `buy_from_vault` proceeds flows to the DAO before authority handoff. (The other 50% goes to the founder wallet set in Step 2 — a disclosed founder fee. See FAQ/SECURITY.md.)
 
 ## Step 4 — Propose authority transfer
 
@@ -171,7 +173,8 @@ Once `pool_sol_balance` ≥ 1 SOL. **Signature now takes `max_tobe_to_pair: u64`
 | `set_pool_config` | `d857417d716eb978` | `tobe_is_token_0: bool` | Step 9 |
 | `arm_floor` | `cbf35c2766bfc696` | — | Step 11 (council 2-of-3, authority-only) |
 | `flush_lp_to_raydium` | `1324c3f558c78cd9` | `max_tobe_to_pair: u64` | Step 10 (permissionless) |
-| `update_treasury` | `3c10f342603bfe83` | `new_treasury: pubkey` | Redirect proceeds |
+| `update_treasury` | `3c10f342603bfe83` | `new_treasury: pubkey` | Redirect the DAO's 50% of `buy_from_vault` proceeds |
+| `update_founder` | `5a715db1dc38ff70` | `new_founder: pubkey` | Redirect the founder's 50% of `buy_from_vault` proceeds |
 | `pause` | `d316ddfb4a79c12f` | — | Emergency stop (now gates mint + all fund-moving ix) |
 | `unpause` | `a99004260a8dbcff` | — | Resume |
 

@@ -17,13 +17,14 @@ Each round costs **10 SOL** and mints a decreasing number of TOBE tokens.
 |--------------------------|-----------------------------|---------------------------------------------------------------------------------------|
 | `initialize`             | Deployer (once)             | Creates mint, vault, PDAs, Metaplex metadata                                          |
 | `mint_tobe`              | Anyone                      | Pays 10 SOL → 50% TOBE to minter, 50% to vault, 5 SOL to pool reserve, 5 SOL to vault SOL reserve. **Zero SOL to authority.** |
-| `buy_from_vault`         | Anyone                      | Permissionless arbitrage: send SOL, receive TOBE at \$1 USD via Pyth oracle. Caps price at \$1. SOL flows to authority's treasury. |
+| `buy_from_vault`         | Anyone                      | Permissionless arbitrage: send SOL, receive TOBE at \$1 USD via Pyth oracle. Caps price at \$1. **SOL is split 50/50: half to the DAO treasury, half to the founder wallet — a disclosed founder fee on ceiling-arbitrage proceeds.** |
 | `sell_to_vault`          | Anyone                      | Permissionless arbitrage: send TOBE, receive SOL at \$1 USD via Pyth oracle from vault SOL reserve. Defends \$1 floor. |
 | `set_pool_config`        | Authority (once)            | Records Raydium pool addresses on-chain after authority creates the pool externally.  |
 | `flush_lp_to_raydium`    | Anyone                      | When ≥1 SOL pending: deposits accumulated SOL + matching TOBE into Raydium pool, **burns LP tokens permanently** in same tx. |
 | `migrate_state_v2`       | Authority (one-time)        | Reallocates `mint_state` PDA to fit Phase 2 fields; idempotent (no-op if already at v2 size). |
 | `arm_floor`              | Authority only (H1 fix)     | One-way latch enabling `sell_to_vault` (the $1 floor) once TOBE reaches $1. Authority-gated so the manipulable pool spot-price check cannot be flash-gamed to arm the floor early. (`seed_pool` was **removed** — M1 fix: it was a legacy authority fund-movement primitive unused by the fair launch.) |
-| `update_treasury`        | Authority only              | Changes destination wallet for `buy_from_vault` arbitrage proceeds.                   |
+| `update_treasury`        | Authority only              | Changes the DAO-treasury wallet (its 50%) for `buy_from_vault` proceeds.               |
+| `update_founder`         | Authority only              | Changes the founder wallet (its 50%) for `buy_from_vault` proceeds. Rejects the zero address. |
 | `pause`                  | Authority only              | Stops all minting (emergency).                                                         |
 | `unpause`                | Authority only              | Resumes minting.                                                                       |
 | `propose_authority`      | Authority only              | Step 1 of 2-step authority transfer; sets pending authority.                           |
