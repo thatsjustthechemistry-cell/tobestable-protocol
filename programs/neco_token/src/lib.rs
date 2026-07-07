@@ -101,10 +101,15 @@ pub mod neco_token {
         ctx: Context<Initialize>,
         treasury: Pubkey,
         admin_authority: Pubkey,
+        founder: Pubkey,
     ) -> Result<()> {
         let mint_state = &mut ctx.accounts.mint_state;
         mint_state.authority = admin_authority;
         mint_state.treasury = treasury;
+        // Founder revenue wallet: receives 50% of buy_from_vault (ceiling-
+        // arbitrage) proceeds; the other 50% goes to `treasury` (the DAO).
+        // This is a DISCLOSED founder fee — see docs + FAQ.
+        mint_state.founder = founder;
         mint_state.current_round = 0;
         mint_state.tobe_mint = ctx.accounts.tobe_mint.key();
         mint_state.vault_balance = 0;
@@ -282,10 +287,18 @@ pub mod neco_token {
     /// Permissionless: anyone can buy TOBE from the vault at $1/TOBE when Pyth says
     /// SOL/USD is positive (i.e., always, since this caps the upside at $1).
     /// Buyer sends `sol_in_lamports`, receives equivalent TOBE at $1 each.
-    /// All received SOL flows to the treasury (authority's wallet).
+    /// Received SOL is split 50/50: half to the DAO treasury, half to the
+    /// founder wallet (a disclosed founder fee on ceiling-arbitrage proceeds).
     pub fn buy_from_vault(ctx: Context<BuyFromVault>, sol_in_lamports: u64) -> Result<()> {
         require!(!ctx.accounts.mint_state.paused, TobeError::MintingPaused);
         require!(sol_in_lamports > 0, TobeError::ZeroAmount);
+        // Guard: never split to an unset (zero) founder — that would burn 50%
+        // to the system address. Fresh initialize always sets it; this protects
+        // against a migrated state where the field defaulted to zero.
+        require!(
+            ctx.accounts.mint_state.founder != Pubkey::default(),
+            TobeError::Unauthorized
+        );
 
         let (price, exponent) = read_sol_usd_price(&ctx.accounts.pyth_price_update)?;
         let tobe_out = lamports_to_tobe_at_one_usd(sol_in_lamports, price, exponent)?;
@@ -297,7 +310,12 @@ pub mod neco_token {
             TobeError::InsufficientVault
         );
 
-        // 1. Buyer SOL → treasury (authority earns).
+        // 1. Split proceeds 50/50: DAO treasury + founder. Integer split gives
+        //    any odd lamport to the DAO (dao_cut = total - founder_cut).
+        let founder_cut = sol_in_lamports / 2;
+        let dao_cut = sol_in_lamports
+            .checked_sub(founder_cut)
+            .ok_or(TobeError::MathOverflow)?;
         anchor_lang::system_program::transfer(
             CpiContext::new(
                 ctx.accounts.system_program.to_account_info(),
@@ -306,7 +324,17 @@ pub mod neco_token {
                     to: ctx.accounts.treasury.to_account_info(),
                 },
             ),
-            sol_in_lamports,
+            dao_cut,
+        )?;
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.founder.to_account_info(),
+                },
+            ),
+            founder_cut,
         )?;
 
         // 2. Vault TOBE → buyer (vault PDA signs).
@@ -334,8 +362,8 @@ pub mod neco_token {
             .ok_or(TobeError::MathOverflow)?;
 
         msg!(
-            "buy_from_vault: {} lamports → {} TOBE @ $1 (SOL/USD price={}, exp={})",
-            sol_in_lamports, tobe_out, price, exponent
+            "buy_from_vault: {} lamports ({} DAO + {} founder) → {} TOBE @ $1 (SOL/USD={}e{})",
+            sol_in_lamports, dao_cut, founder_cut, tobe_out, price, exponent
         );
         Ok(())
     }
@@ -754,6 +782,15 @@ pub mod neco_token {
         Ok(())
     }
 
+    /// Change the founder revenue wallet (receives 50% of buy_from_vault).
+    /// Authority-only (a 2-of-3 council proposal after migration). Rejects the
+    /// zero address, which would burn the founder half.
+    pub fn update_founder(ctx: Context<UpdateTreasury>, new_founder: Pubkey) -> Result<()> {
+        require!(new_founder != Pubkey::default(), TobeError::InvalidAmount);
+        ctx.accounts.mint_state.founder = new_founder;
+        Ok(())
+    }
+
     /// One-time migration: reallocates the existing mint_state PDA to fit
     /// new MintState fields (raydium pool config). New bytes are zero-init,
     /// which is exactly the "unconfigured" default for Pubkey + u64 + bool.
@@ -1088,12 +1125,19 @@ pub struct BuyFromVault<'info> {
     #[account(mut, seeds = [b"vault_token"], bump)]
     pub vault_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// Treasury wallet — receives SOL from buyer (authority earns).
+    /// DAO treasury wallet — receives 50% of buy_from_vault proceeds.
     #[account(
         mut,
         constraint = treasury.key() == mint_state.treasury @ TobeError::Unauthorized
     )]
     pub treasury: SystemAccount<'info>,
+
+    /// Founder wallet — receives the other 50% (disclosed founder fee).
+    #[account(
+        mut,
+        constraint = founder.key() == mint_state.founder @ TobeError::Unauthorized
+    )]
+    pub founder: SystemAccount<'info>,
 
     #[account(
         mut,
@@ -1203,8 +1247,11 @@ pub struct FlushLpToRaydium<'info> {
     #[account(mut)]
     pub caller: Signer<'info>,
 
+    // Boxed to keep this large context's try_accounts off the SBF stack frame
+    // (the Raydium CPI has ~18 accounts; a non-boxed MintState here trips the
+    // 4KB stack-frame limit).
     #[account(mut, seeds = [b"mint_state"], bump)]
-    pub mint_state: Account<'info, MintState>,
+    pub mint_state: Box<Account<'info, MintState>>,
 
     #[account(mut, address = mint_state.tobe_mint)]
     pub tobe_mint: Box<InterfaceAccount<'info, Mint>>,
@@ -1471,6 +1518,8 @@ pub struct MintState {
     pub floor_active: bool,                // 1  — one-way latch: sell_to_vault floor is disabled
                                            //      until TOBE first reaches $1 (see arm_floor),
                                            //      preventing the early below-$1 drain arbitrage
+    pub founder: Pubkey,                   // 32 — receives 50% of buy_from_vault proceeds
+                                           //      (disclosed founder fee); other 50% → treasury
 }
 
 // ─── Errors ───

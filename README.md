@@ -16,7 +16,7 @@ Anti-inflationary Solana SPL token with 1024 decreasing mint rounds and a permis
 
 Two permissionless instructions read Pyth SOL/USD on-chain and price TOBE at exactly $1 USD:
 
-- **`buy_from_vault(sol_in_lamports)`** — anyone sends SOL, receives `sol * sol_usd_price` TOBE from the vault. Caps the upside at $1; SOL flows to authority's wallet (the only path through which authority earns).
+- **`buy_from_vault(sol_in_lamports)`** — anyone sends SOL, receives `sol * sol_usd_price` TOBE from the vault. Caps the upside at $1. Incoming SOL is **split 50/50: half to the DAO treasury, half to the founder wallet** (a disclosed founder fee — the only path through which the founder earns protocol revenue). Only fires at/above $1.
 - **`sell_to_vault(tobe_in_raw)`** — anyone deposits TOBE, receives equivalent SOL at $1/TOBE drawn from `vault_sol_reserve`. Defends the floor; bought TOBE replenishes the vault.
 
 Pyth `PriceUpdateV2` is validated on every call:
@@ -38,13 +38,14 @@ Pyth `PriceUpdateV2` is validated on every call:
 |---|---|---|
 | `initialize` | Authority (one-time) | Create state, mint, vaults, Metaplex metadata |
 | `mint_tobe` | Anyone | Pay 10 SOL → 50% TOBE to caller, 50% to vault, 5/5 SOL split to reserves |
-| `buy_from_vault` | Anyone | SOL in → TOBE out @ $1 (caps price). SOL → authority |
+| `buy_from_vault` | Anyone | SOL in → TOBE out @ $1 (caps price). SOL split 50/50: DAO treasury + founder |
 | `sell_to_vault` | Anyone | TOBE in → SOL out @ $1 (defends floor) |
 | `arm_floor` | Authority only | Latch the $1 floor on once TOBE reaches $1 (H1 fix; `seed_pool` removed) |
 | `lock_lp` / `unlock_lp` | Authority | 2-year LP token timelock |
 | `pause` / `unpause` | Authority | Emergency mint halt |
 | `propose_authority` / `accept_authority` | Authority / new authority | 2-step ownership transfer |
-| `update_treasury` | Authority | Change destination for `buy_from_vault` proceeds |
+| `update_treasury` | Authority | Change the DAO-treasury destination (50%) for `buy_from_vault` proceeds |
+| `update_founder` | Authority | Change the founder destination (50%) for `buy_from_vault` proceeds |
 | `update_metadata` | Authority | Update Metaplex token name / symbol / URI |
 
 ## Features

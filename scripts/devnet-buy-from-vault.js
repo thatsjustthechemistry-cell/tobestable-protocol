@@ -134,6 +134,7 @@ async function main() {
             vaultAuthority: vaultAuthorityPda,
             vaultTokenAccount: vaultTokenPda,
             treasury: state.treasury,
+            founder: state.founder, // 50% founder split
             buyerTobe: buyerTobeKp.publicKey,
             pythPriceUpdate: priceUpdateAccount,
             tokenProgram: TOKEN_PROGRAM_ID,

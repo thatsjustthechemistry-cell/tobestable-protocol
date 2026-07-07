@@ -31,9 +31,10 @@ const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ
 
 function parseArgs() {
   const args = process.argv.slice(2);
-  const out = { treasury: null, yes: false };
+  const out = { treasury: null, founder: null, yes: false };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--treasury') out.treasury = args[++i];
+    else if (args[i] === '--founder') out.founder = args[++i];
     else if (args[i] === '--yes' || args[i] === '-y') out.yes = true;
   }
   return out;
@@ -47,7 +48,7 @@ async function confirm(prompt) {
 }
 
 async function main() {
-  const { treasury, yes } = parseArgs();
+  const { treasury, founder, yes } = parseArgs();
 
   // Load deployer/authority keypair
   const keypairPath = path.join(process.env.USERPROFILE || process.env.HOME, '.config', 'solana', 'id.json');
@@ -55,6 +56,10 @@ async function main() {
   const payer = Keypair.fromSecretKey(Uint8Array.from(secret));
 
   const treasuryPk = new PublicKey(treasury || payer.publicKey.toBase58());
+  // Founder revenue wallet: receives 50% of buy_from_vault (ceiling-arbitrage)
+  // proceeds. Defaults to the signer; pass --founder <PUBKEY> for a dedicated
+  // wallet. This is a DISCLOSED founder fee (see FAQ / SECURITY.md).
+  const founderPk = new PublicKey(founder || payer.publicKey.toBase58());
 
   const connection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed');
   const provider = new anchor.AnchorProvider(connection, new anchor.Wallet(payer), { commitment: 'confirmed' });
@@ -69,6 +74,7 @@ async function main() {
   console.log('  Program ID:    ', PROGRAM_ID.toBase58());
   console.log('  Signer/Payer:  ', payer.publicKey.toBase58(), `(${(balance / 1e9).toFixed(4)} SOL)`);
   console.log('  Treasury:      ', treasuryPk.toBase58(), treasuryPk.equals(payer.publicKey) ? '(= signer, default)' : '(custom)');
+  console.log('  Founder (50%): ', founderPk.toBase58(), founderPk.equals(payer.publicKey) ? '(= signer, default)' : '(custom)');
 
   if (balance < 0.1 * 1e9) {
     console.error('❌ Balance too low. Need ≥0.1 SOL for init rent + fees.');
@@ -120,7 +126,7 @@ async function main() {
 
   console.log('\nSending initialize...');
   const tx = await program.methods
-    .initialize(treasuryPk, payer.publicKey)
+    .initialize(treasuryPk, payer.publicKey, founderPk)
     .accounts({
       authority: payer.publicKey,
       mintState: mintStatePda,
