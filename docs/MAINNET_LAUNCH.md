@@ -146,12 +146,26 @@ Prints 5 pool addresses → `scripts/.mainnet-pool.json`. **The pool is external
 
 ## Step 9 — Council proposal: `set_pool_config`
 
-Authority is now Realms, so this is a council proposal. Custom instruction:
+Authority is now Realms, so this is a council proposal.
+
+**Preferred (scripted; run as a council member, after Step 8):**
+```bash
+node scripts/propose-set-pool-config.js [--vote]
+```
+Reads `scripts/.mainnet-pool.json` (written by Step 8), builds the `set_pool_config` instruction via the program's IDL, and wraps it in a Realms proposal — no hand-typed hex or manually-ordered accounts. `--vote` also casts your yes vote in the same run. One more council member votes yes, then anyone executes.
+
+<details><summary>Manual Realms-UI fallback (raw instruction, if the script is unavailable)</summary>
+
 - **Program:** `Eekx6ftd...`
 - **Data (hex):** `d857417d716eb978` + `01` if `tobeIsToken0` (from `.mainnet-pool.json`) is true, else `00`
 - **Accounts:** (1) `Cb7TsQF...` authority ✅✅ · (2) mint_state PDA ❌✅ · (3) `raydium_pool_state` · (4) `raydium_pool_authority` · (5) `raydium_lp_mint` · (6) `raydium_token_0_vault` · (7) `raydium_token_1_vault` (3–7 ❌❌)
 
+Verified byte-for-byte against the built IDL (discriminator, arg encoding, account order, and every signer/writable flag) — accurate as of the current contract.
+</details>
+
 Records the pool + captures the 30%-floor baseline (`vault_tobe_at_config`) from the current vault balance. (No longer gated on `pool_seeded` — fixed for the fair-launch flow.) After this, `flush_lp_to_raydium` is callable.
+
+> **Rehearsal note:** the governance mechanics (proposal → 2-of-3 vote → the treasury PDA's CPI-signed execution) were proven end-to-end on devnet — the transaction reached deep inside `set_pool_config`, confirming the authority signer check passes correctly for a real governance-executed call. The one check that could NOT be devnet-tested is Raydium pool ownership: the contract's `AccountLoader<PoolState>` validates against the **mainnet** Raydium CPMM program ID (hardcoded in the `raydium-cp-swap` dependency), and devnet's Raydium CPMM is a different program entirely — so a devnet-created pool is structurally rejected by design. This is a security feature (rejects spoofed pool accounts), not a gap in this script.
 
 ## Step 10 — Anyone calls `flush_lp_to_raydium` (permissionless)
 
