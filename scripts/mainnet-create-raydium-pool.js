@@ -15,6 +15,11 @@
 // Defaults: 1000 TOBE + 0.0191 SOL = round-1-implied price (~$0.0019/TOBE
 // at SOL=$190). Tiny seed; real depth comes from flush_lp_to_raydium later.
 //
+// RPC: defaults to the public api.mainnet-beta.solana.com, which can be
+// rate-limit-prone. Override with a dedicated endpoint if needed:
+//   MAINNET_RPC_URL="https://mainnet.helius-rpc.com/?api-key=<KEY>" \
+//     TOBE_MINT=<...> node scripts/mainnet-create-raydium-pool.js
+//
 // After this completes, the addresses printed must be recorded on-chain via
 // set_pool_config (which requires authority signature — see docs/MAINNET_LAUNCH.md).
 
@@ -66,7 +71,12 @@ async function main() {
     Uint8Array.from(JSON.parse(fs.readFileSync(keypairPath, "utf8")))
   );
 
-  const connection = new Connection("https://api.mainnet-beta.solana.com", "confirmed");
+  // The public RPC is rate-limit-prone under real load (hit repeatedly during
+  // devnet governance testing). Override with a dedicated mainnet endpoint,
+  // e.g. MAINNET_RPC_URL="https://mainnet.helius-rpc.com/?api-key=<KEY>".
+  const rpcUrl = process.env.MAINNET_RPC_URL || "https://api.mainnet-beta.solana.com";
+  console.log("RPC:", rpcUrl.includes("api-key=") ? rpcUrl.replace(/api-key=[^&]+/, "api-key=***") : rpcUrl);
+  const connection = new Connection(rpcUrl, "confirmed");
   const raydium = await Raydium.load({
     connection,
     owner: wallet,
