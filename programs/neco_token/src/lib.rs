@@ -190,7 +190,11 @@ pub mod neco_token {
         Ok(())
     }
 
-    pub fn mint_tobe(ctx: Context<MintTobe>) -> Result<()> {
+    /// `referrer` is optional and purely informational — it does not change any
+    /// token/SOL amounts (no reward, no fee). It is written to the program log
+    /// (`msg!`) so the referral is permanently part of this transaction's
+    /// on-chain record, retrievable via any explorer or `getTransaction`.
+    pub fn mint_tobe(ctx: Context<MintTobe>, referrer: Option<Pubkey>) -> Result<()> {
         let mint_state = &mut ctx.accounts.mint_state;
 
         require!(!mint_state.paused, TobeError::MintingPaused);
@@ -198,6 +202,9 @@ pub mod neco_token {
             mint_state.current_round < MAX_ROUNDS,
             TobeError::AllRoundsMinted
         );
+        if let Some(r) = referrer {
+            require!(r != ctx.accounts.minter.key(), TobeError::SelfReferral);
+        }
 
         mint_state.current_round += 1;
         let round = mint_state.current_round;
@@ -281,6 +288,10 @@ pub mod neco_token {
 
         msg!("Round {}: {} TOBE minted ({} to minter, {} to vault); 5 SOL → pool, 5 SOL → vault_sol",
             round, token_units, minter_tokens, vault_tokens);
+        match referrer {
+            Some(r) => msg!("Referral: minter={}, referrer={}", ctx.accounts.minter.key(), r),
+            None => msg!("Referral: minter={}, referrer=none", ctx.accounts.minter.key()),
+        }
         Ok(())
     }
 
@@ -1566,6 +1577,8 @@ pub enum TobeError {
     PoolSolInsufficient,
     #[msg("Amount must be greater than zero")]
     ZeroAmount,
+    #[msg("Cannot refer yourself")]
+    SelfReferral,
     // ─── Phase 2: Raydium flush errors ───
     #[msg("Pool config has not been set; call set_pool_config first")]
     PoolNotConfigured,

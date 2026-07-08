@@ -208,7 +208,7 @@ describe("tobestable", () => {
     );
 
     const tx = await program.methods
-      .mintTobe()
+      .mintTobe(null)
       .accounts({
         minter: authority.publicKey,
         mintState: mintStatePda,
@@ -259,7 +259,7 @@ describe("tobestable", () => {
     const vaultSolBefore = await provider.connection.getBalance(vaultSolReservePda);
 
     const tx = await program.methods
-      .mintTobe()
+      .mintTobe(null)
       .accounts({
         minter: authority.publicKey,
         mintState: mintStatePda,
@@ -288,11 +288,14 @@ describe("tobestable", () => {
 
   // ── 4. Round 3 Decreasing Formula ──
 
-  it("round 3 yields fewer tokens — verifies decreasing formula", async () => {
+  it("round 3 yields fewer tokens — verifies decreasing formula, with a referrer logged on-chain", async () => {
     const minterTobeBefore = await getAccount(provider.connection, minterTobe);
+    // Exercise the optional referrer here too (no extra round consumed): it's
+    // purely informational — no reward/fee — and should appear in the tx log.
+    const referrer = anchor.web3.Keypair.generate().publicKey;
 
-    await program.methods
-      .mintTobe()
+    const tx = await program.methods
+      .mintTobe(referrer)
       .accounts({
         minter: authority.publicKey,
         mintState: mintStatePda,
@@ -316,7 +319,48 @@ describe("tobestable", () => {
 
     const minterTobeAfter = await getAccount(provider.connection, minterTobe);
     const received = Number(minterTobeAfter.amount) - Number(minterTobeBefore.amount);
+    // No reward/fee for the referral: minter still gets exactly the round share.
     assert.equal(received, expectedMinter);
+
+    // Referral is logged on-chain (msg!), not stored in state — confirm it
+    // shows up in this transaction's program log.
+    const txDetails = await provider.connection.getTransaction(tx, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+    });
+    const logs = txDetails.meta.logMessages.join("\n");
+    assert.ok(
+      logs.includes(referrer.toString()),
+      "referrer pubkey should appear in the transaction's program log"
+    );
+  });
+
+  it("rejects self-referral", async () => {
+    let threw = false;
+    try {
+      await program.methods
+        .mintTobe(authority.publicKey) // referrer === minter
+        .accounts({
+          minter: authority.publicKey,
+          mintState: mintStatePda,
+          tobeMint: tobeMint.publicKey,
+          mintAuthority: mintAuthorityPda,
+          vaultTokenAccount: vaultTokenPda,
+          poolSolReserve: poolSolReservePda,
+          vaultSolReserve: vaultSolReservePda,
+          minterTobe: minterTobe,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .rpc();
+    } catch (e) {
+      threw = true;
+      assert.ok(
+        String(e).includes("SelfReferral") || String(e).includes("Cannot refer yourself"),
+        `expected SelfReferral error, got: ${e}`
+      );
+    }
+    assert.ok(threw, "self-referral mint should have been rejected");
   });
 
   // ── 5 & 6. Seed Pool tests REMOVED (M1 audit fix) ──
@@ -341,7 +385,7 @@ describe("tobestable", () => {
 
     try {
       await program.methods
-        .mintTobe()
+        .mintTobe(null)
         .accounts({
           minter: brokeMinter.publicKey,
           mintState: mintStatePda,
@@ -434,7 +478,7 @@ describe("tobestable", () => {
   it("rejects mint while paused", async () => {
     try {
       await program.methods
-        .mintTobe()
+        .mintTobe(null)
         .accounts({
           minter: authority.publicKey,
           mintState: mintStatePda,
@@ -536,7 +580,7 @@ describe("tobestable", () => {
   it("mints all remaining rounds through 1024, then rejects round 1025", async () => {
     for (let r = 4; r <= 1024; r++) {
       await program.methods
-        .mintTobe()
+        .mintTobe(null)
         .accounts({
           minter: authority.publicKey,
           mintState: mintStatePda,
@@ -562,7 +606,7 @@ describe("tobestable", () => {
     // Round 1025 must be rejected
     try {
       await program.methods
-        .mintTobe()
+        .mintTobe(null)
         .accounts({
           minter: authority.publicKey,
           mintState: mintStatePda,

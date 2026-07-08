@@ -142,7 +142,7 @@ async function main() {
   const balanceBefore = await connection.getBalance(payer.publicKey);
 
   const mintTx = await program.methods
-    .mintTobe()
+    .mintTobe(null)
     .accounts({
       minter: payer.publicKey,
       mintState: mintStatePda,
