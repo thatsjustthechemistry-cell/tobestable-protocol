@@ -39,8 +39,11 @@
 //
 // Usage (dry run by default — computes amounts, sends nothing):
 //   TOBE_MINT=<MAINNET_MINT_PUBKEY> node scripts/mainnet-team-lp-and-lock.js \
-//     [--tobe 5000000] [--slippage 0.5] \
+//     --tobe <amount> [--slippage 0.5] \
 //     [--team-keypair <path>] [--authority-keypair <path>] [--execute]
+//
+// No fixed minimum --tobe — the dry run always shows the exact paired SOL
+// cost (which moves with SOL's price) before you commit anything.
 //
 // --team-keypair defaults to ~/.config/solana/id.json (override if the team
 // wallet's key lives elsewhere). --authority-keypair is only required on the
@@ -78,7 +81,7 @@ const TEAM_WALLET = "Eis6SPak12JXqunZqLqgHneomygF1ouuoRk5PFXB5Bvf";
 function parseArgs() {
   const args = process.argv.slice(2);
   const out = {
-    tobe: 5_000_000,
+    tobe: null,
     slippagePct: 0.5,
     teamKeypairPath: path.join(os.homedir(), ".config", "solana", "id.json"),
     authorityKeypairPath: null,
@@ -115,8 +118,10 @@ async function main() {
   }
   const TOBE_MINT = new PublicKey(process.env.TOBE_MINT);
 
-  if (tobe < 5_000_000) {
-    console.error(`❌ --tobe ${tobe} is below the intended minimum of 5,000,000. Pass --tobe explicitly if you mean less.`);
+  if (!tobe || tobe <= 0) {
+    console.error("❌ Missing --tobe <amount>. No default — pick a token amount that fits your actual SOL budget");
+    console.error("   (the dry run below will show the exact paired SOL cost at the current pool price before");
+    console.error("   you commit to anything — re-run with a smaller --tobe if it's more than you want to spend).");
     process.exit(1);
   }
 
