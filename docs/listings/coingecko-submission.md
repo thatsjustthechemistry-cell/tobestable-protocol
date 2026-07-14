@@ -84,7 +84,7 @@ How it works:
   TOBE into the Raydium pool. The LP tokens received are burned in the same atomic transaction —
   liquidity cannot be removed by anyone, ever.
 
-• No team allocation. No pre-mine. No insiders. Founder mints under the same rules as everyone else.
+• Team allocation: 16 free mint rounds, hard-capped in the contract and disclosed (≈ 1.6% of rounds). No other insiders; beyond the cap the founder mints under the same rules as everyone else.
 
 Built on Anchor framework. Smart contract source open on GitHub. Authority controlled by Squads multisig.
 ```

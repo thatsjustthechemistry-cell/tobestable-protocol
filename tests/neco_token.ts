@@ -84,6 +84,11 @@ describe("tobestable", () => {
 
   const authority = provider.wallet as anchor.Wallet;
   const treasury = anchor.web3.Keypair.generate();
+  // Disclosed team allocation wallet (mainnet: Eis6…5Bvf; tests use a throwaway
+  // keypair since the real key can't sign here). Stored immutably at initialize.
+  const teamWallet = anchor.web3.Keypair.generate();
+  const TEAM_FREE_MINT_CAP = 16;
+  let teamTobe: anchor.web3.PublicKey;
   let tobeMint: anchor.web3.Keypair;
   let minterTobe: anchor.web3.PublicKey;
   let mintStatePda: anchor.web3.PublicKey;
@@ -157,7 +162,7 @@ describe("tobestable", () => {
     );
 
     const tx = await program.methods
-      .initialize(treasury.publicKey, authority.publicKey)
+      .initialize(treasury.publicKey, authority.publicKey, authority.publicKey, teamWallet.publicKey)
       .accounts({
         authority: authority.publicKey,
         mintState: mintStatePda,
@@ -195,6 +200,9 @@ describe("tobestable", () => {
     // Floor-activation latch (audit hardening): starts OFF; sell_to_vault is
     // disabled until arm_floor latches it true once TOBE first reaches $1.
     assert.equal(state.floorActive, false);
+    // Disclosed team allocation: wallet stored immutably, counter starts at 0.
+    assert.equal(state.teamWallet.toString(), teamWallet.publicKey.toString());
+    assert.equal(state.teamFreeMintsUsed.toNumber(), 0);
   });
 
   // ── 2. Mint Round 1 ──
@@ -575,10 +583,117 @@ describe("tobestable", () => {
     }
   });
 
+  // ── 15b. Disclosed Team Allocation ──
+
+  it("team wallet mints free — no SOL debit, reserves untouched, same 50/50 split, counter increments", async () => {
+    // Fund the team wallet: tx fees + rent + the paid 17th mint in the next test
+    const fundTx = new anchor.web3.Transaction().add(
+      anchor.web3.SystemProgram.transfer({
+        fromPubkey: authority.publicKey,
+        toPubkey: teamWallet.publicKey,
+        lamports: 12_000_000_000,
+      })
+    );
+    await provider.sendAndConfirm(fundTx, []);
+
+    teamTobe = await createTokenAccountHelper(
+      provider.connection,
+      (authority as any).payer,
+      tobeMint.publicKey,
+      teamWallet.publicKey
+    );
+
+    const stateBefore = await program.account.mintState.fetch(mintStatePda);
+    const roundBefore = stateBefore.currentRound.toNumber();
+    const poolBefore = await provider.connection.getBalance(poolSolReservePda);
+    const vaultSolBefore = await provider.connection.getBalance(vaultSolReservePda);
+    const teamBalBefore = await provider.connection.getBalance(teamWallet.publicKey);
+
+    await program.methods
+      .mintTobe(null)
+      .accounts({
+        minter: teamWallet.publicKey,
+        mintState: mintStatePda,
+        tobeMint: tobeMint.publicKey,
+        mintAuthority: mintAuthorityPda,
+        vaultTokenAccount: vaultTokenPda,
+        poolSolReserve: poolSolReservePda,
+        vaultSolReserve: vaultSolReservePda,
+        minterTobe: teamTobe,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .signers([teamWallet])
+      .rpc();
+
+    const state = await program.account.mintState.fetch(mintStatePda);
+    const round = roundBefore + 1;
+    assert.equal(state.currentRound.toNumber(), round);
+    assert.equal(state.teamFreeMintsUsed.toNumber(), 1);
+
+    // Only the tx fee left the team wallet — the 10 SOL payment was waived
+    const teamBalAfter = await provider.connection.getBalance(teamWallet.publicKey);
+    assert.ok(teamBalBefore - teamBalAfter < 100_000, "only the tx fee should be debited");
+
+    // Neither reserve received anything for this round
+    assert.equal(await provider.connection.getBalance(poolSolReservePda), poolBefore);
+    assert.equal(await provider.connection.getBalance(vaultSolReservePda), vaultSolBefore);
+    // LP accounting untouched by the free round
+    assert.equal(state.poolSolBalance.toNumber(), stateBefore.poolSolBalance.toNumber());
+
+    // Token split identical to a paid mint: 50% team, 50% vault
+    const totalTokens = 1024 * (1024 + 1 - round) * TOBE_DECIMALS;
+    const teamAccount = await getAccount(provider.connection, teamTobe);
+    assert.equal(Number(teamAccount.amount), Math.floor(totalTokens / 2));
+  });
+
+  it("cap enforced: free through mint 16, the 17th team mint pays like everyone", async () => {
+    const teamMint = () =>
+      program.methods
+        .mintTobe(null)
+        .accounts({
+          minter: teamWallet.publicKey,
+          mintState: mintStatePda,
+          tobeMint: tobeMint.publicKey,
+          mintAuthority: mintAuthorityPda,
+          vaultTokenAccount: vaultTokenPda,
+          poolSolReserve: poolSolReservePda,
+          vaultSolReserve: vaultSolReservePda,
+          minterTobe: teamTobe,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([teamWallet])
+        .rpc();
+
+    // Consume the remaining 15 free mints (one was used in the previous test)
+    for (let i = 2; i <= TEAM_FREE_MINT_CAP; i++) {
+      await teamMint();
+    }
+    let state = await program.account.mintState.fetch(mintStatePda);
+    assert.equal(state.teamFreeMintsUsed.toNumber(), TEAM_FREE_MINT_CAP);
+
+    // 17th team mint: cap exhausted — full 10 SOL payment applies
+    const teamBalBefore = await provider.connection.getBalance(teamWallet.publicKey);
+    const poolBefore = await provider.connection.getBalance(poolSolReservePda);
+    const vaultSolBefore = await provider.connection.getBalance(vaultSolReservePda);
+
+    await teamMint();
+
+    state = await program.account.mintState.fetch(mintStatePda);
+    assert.equal(state.teamFreeMintsUsed.toNumber(), TEAM_FREE_MINT_CAP, "counter must not pass the cap");
+
+    const teamBalAfter = await provider.connection.getBalance(teamWallet.publicKey);
+    assert.ok(teamBalBefore - teamBalAfter >= MINT_COST, "17th team mint must pay the full 10 SOL");
+    assert.equal(await provider.connection.getBalance(poolSolReservePda), poolBefore + MINT_COST / 2);
+    assert.equal(await provider.connection.getBalance(vaultSolReservePda), vaultSolBefore + MINT_COST / 2);
+  });
+
   // ── 16. All Remaining Rounds ──
 
   it("mints all remaining rounds through 1024, then rejects round 1025", async () => {
-    for (let r = 4; r <= 1024; r++) {
+    const st = await program.account.mintState.fetch(mintStatePda);
+    for (let r = st.currentRound.toNumber() + 1; r <= 1024; r++) {
       await program.methods
         .mintTobe(null)
         .accounts({

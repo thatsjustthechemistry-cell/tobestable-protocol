@@ -12,7 +12,7 @@
 
 **1/ Hook**
 `<<YOUR VOICE — one punchy line on what TOBESTABLE is and why you built it. Default below; rewrite in your voice.>>`
-> TOBESTABLE ($TOBE) is live on Solana. A fair-launch token with an on-chain $1 reference — a hard ceiling, a reserve-backed floor, no team allocation, no presale, multisig-governed. Built to be honest about what it is.
+> TOBESTABLE ($TOBE) is live on Solana. A fair-launch token with an on-chain $1 reference — a hard ceiling, a reserve-backed floor, a disclosed hard-capped team allocation (16 free rounds), no presale, multisig-governed. Built to be honest about what it is.
 
 **2/ What it actually is (no overclaiming)**
 TOBE isn't a fiat-backed stablecoin and it isn't a "guaranteed $1" coin. It's an anti-inflationary token with an on-chain mechanism that pushes price toward $1 — strongly from above, partially from below. Here's exactly how 👇
@@ -24,7 +24,7 @@ Above $1, anyone can buy TOBE from the protocol vault at exactly $1 and sell on 
 Below $1, anyone can buy cheap TOBE and sell it to the vault at $1, drawn from an on-chain SOL reserve (5 SOL accrues per mint round). This floor is real but **bounded by the reserve** — it defends as far as the reserve reaches, not infinitely. It also only activates once TOBE first reaches $1. We say this plainly because pretending otherwise is how UST died.
 
 **5/ Fair launch — the numbers**
-1,024 mint rounds. Every round costs 10 SOL. Round 1 mints 524,288 TOBE; each round mints fewer (anti-inflationary curve), down to 512 in round 1,024. 50% to the minter, 50% to the protocol vault. No presale. No team tokens. No SOL to the team from mints.
+1,024 mint rounds. Every round costs 10 SOL. Round 1 mints 524,288 TOBE; each round mints fewer (anti-inflationary curve), down to 512 in round 1,024. 50% to the minter, 50% to the protocol vault. No presale. Team allocation: 16 disclosed free rounds, hard-capped on-chain. No SOL to the team from mints.
 
 **6/ Permanent liquidity**
 Half of every mint's SOL accumulates and is deposited into a Raydium TOBE/SOL pool — and the LP tokens are **burned**. The liquidity is locked forever; nobody, including me, can pull it.
@@ -58,7 +58,7 @@ If "verifiable, honest, fair-launch" is the kind of thing you've been waiting fo
 
 ## B. Condensed version (for translated posts — ZH / KO / JA / ES; ~3 tweets each)
 
-**1/** TOBESTABLE ($TOBE) is live on Solana — a fair-launch token with an on-chain $1 reference: a hard ceiling above $1, a reserve-bounded floor below. No presale, no team tokens, no SOL to the team. Multisig-governed.
+**1/** TOBESTABLE ($TOBE) is live on Solana — a fair-launch token with an on-chain $1 reference: a hard ceiling above $1, a reserve-bounded floor below. No presale; a disclosed 16-round team allocation; no SOL to the team from mints. Multisig-governed.
 
 **2/** 1,024 mint rounds, 10 SOL each, decreasing supply per round (anti-inflationary). 50% to minter, 50% to the protocol vault. Liquidity on Raydium with LP burned (locked forever). The floor is real but bounded by its SOL reserve — we say so plainly.
 
@@ -70,7 +70,7 @@ If "verifiable, honest, fair-launch" is the kind of thing you've been waiting fo
 
 ## C. GitHub README / pinned-post one-liner
 
-> **$TOBE** — a fair-launch Solana token with an on-chain $1 reference (hard ceiling, reserve-bounded floor), 1,024 decreasing mint rounds, permanently burned Raydium liquidity, and 2-of-3 multisig governance. No presale, no team allocation. Self-audited; verify on-chain.
+> **$TOBE** — a fair-launch Solana token with an on-chain $1 reference (hard ceiling, reserve-bounded floor), 1,024 decreasing mint rounds, permanently burned Raydium liquidity, and 2-of-3 multisig governance. No presale; one disclosed, hard-capped team allocation (16 free rounds). Self-audited; verify on-chain.
 
 ---
 
