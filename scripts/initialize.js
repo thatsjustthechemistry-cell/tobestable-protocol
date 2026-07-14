@@ -49,7 +49,7 @@ async function main() {
 
   console.log("\nSending initialize transaction...");
   const tx = await program.methods
-    .initialize(TREASURY, AUTHORITY)
+    .initialize(TREASURY, AUTHORITY, AUTHORITY, new PublicKey('Eis6SPak12JXqunZqLqgHneomygF1ouuoRk5PFXB5Bvf'))
     .accounts({
       authority:            payer.publicKey,
       mintState:            mintState,

@@ -83,7 +83,7 @@ async function main() {
     console.log("  pool_sol PDA:     ", poolSolReservePda.toBase58());
 
     const initTx = await program.methods
-      .initialize(payer.publicKey, payer.publicKey)
+      .initialize(payer.publicKey, payer.publicKey, payer.publicKey, new PublicKey('Eis6SPak12JXqunZqLqgHneomygF1ouuoRk5PFXB5Bvf'))
       .accounts({
         authority: payer.publicKey,
         mintState: mintStatePda,

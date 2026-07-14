@@ -19,6 +19,17 @@ declare_id!("Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX");
 
 const MINT_COST: u64 = 10_000_000_000; // 10 SOL in lamports (9 decimals)
 const MAX_ROUNDS: u64 = 1024;
+
+// ─── Disclosed team allocation ───
+// The team wallet (stored immutably in MintState at initialize; mainnet passes
+// Eis6SPak12JXqunZqLqgHneomygF1ouuoRk5PFXB5Bvf) gets its first
+// TEAM_FREE_MINT_CAP mints with the 10 SOL payment waived. Those rounds inject
+// NO SOL into the LP accumulator or the floor reserve; the token split stays
+// identical to a paid mint (50% wallet / 50% vault). Beyond the cap the team
+// wallet pays like any other minter. There is no setter — the wallet cannot be
+// changed after initialize. Free mints are tagged in program logs and disclosed
+// on the site (FAQ + live feed "team" tag).
+const TEAM_FREE_MINT_CAP: u64 = 16;
 const TOKENS_PER_UNIT: u64 = 1024;
 const TOBE_DECIMALS_FACTOR: u64 = 1_000_000_000; // 9 decimals
 const LP_LOCK_DURATION: i64 = 2 * 365 * 24 * 60 * 60; // 2 years in seconds
@@ -102,6 +113,7 @@ pub mod neco_token {
         treasury: Pubkey,
         admin_authority: Pubkey,
         founder: Pubkey,
+        team_wallet: Pubkey,
     ) -> Result<()> {
         let mint_state = &mut ctx.accounts.mint_state;
         mint_state.authority = admin_authority;
@@ -110,6 +122,10 @@ pub mod neco_token {
         // arbitrage) proceeds; the other 50% goes to `treasury` (the DAO).
         // This is a DISCLOSED founder fee — see docs + FAQ.
         mint_state.founder = founder;
+        // Disclosed team allocation wallet (immutable — no setter exists):
+        // first TEAM_FREE_MINT_CAP mints from this wallet are payment-free.
+        mint_state.team_wallet = team_wallet;
+        mint_state.team_free_mints_used = 0;
         mint_state.current_round = 0;
         mint_state.tobe_mint = ctx.accounts.tobe_mint.key();
         mint_state.vault_balance = 0;
@@ -220,29 +236,41 @@ pub mod neco_token {
         let minter_tokens = total_tokens / 2;
         let vault_tokens = total_tokens - minter_tokens;
 
-        // Every round: 5 SOL → pool_sol_reserve (LP injection accumulator)
-        //              5 SOL → vault_sol_reserve (floor defense reserve)
+        // Disclosed team allocation: free while under the cap, then pays like everyone.
+        let is_team_free = ctx.accounts.minter.key() == mint_state.team_wallet
+            && mint_state.team_free_mints_used < TEAM_FREE_MINT_CAP;
+
+        // Every paid round: 5 SOL → pool_sol_reserve (LP injection accumulator)
+        //                   5 SOL → vault_sol_reserve (floor defense reserve)
+        // Team free rounds transfer nothing — no SOL enters either reserve.
         let half_cost = MINT_COST / 2;
-        anchor_lang::system_program::transfer(
-            CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                anchor_lang::system_program::Transfer {
-                    from: ctx.accounts.minter.to_account_info(),
-                    to: ctx.accounts.pool_sol_reserve.to_account_info(),
-                },
-            ),
-            half_cost,
-        )?;
-        anchor_lang::system_program::transfer(
-            CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                anchor_lang::system_program::Transfer {
-                    from: ctx.accounts.minter.to_account_info(),
-                    to: ctx.accounts.vault_sol_reserve.to_account_info(),
-                },
-            ),
-            half_cost,
-        )?;
+        if is_team_free {
+            mint_state.team_free_mints_used = mint_state
+                .team_free_mints_used
+                .checked_add(1)
+                .ok_or(TobeError::MathOverflow)?;
+        } else {
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: ctx.accounts.minter.to_account_info(),
+                        to: ctx.accounts.pool_sol_reserve.to_account_info(),
+                    },
+                ),
+                half_cost,
+            )?;
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: ctx.accounts.minter.to_account_info(),
+                        to: ctx.accounts.vault_sol_reserve.to_account_info(),
+                    },
+                ),
+                half_cost,
+            )?;
+        }
 
         // Mint 50% TOBE to the minter
         let seeds = &[b"mint_authority".as_ref(), &[mint_state.bump]];
@@ -281,13 +309,20 @@ pub mod neco_token {
             .total_minted
             .checked_add(total_tokens)
             .ok_or(TobeError::MathOverflow)?;
-        mint_state.pool_sol_balance = mint_state
-            .pool_sol_balance
-            .checked_add(half_cost)
-            .ok_or(TobeError::MathOverflow)?;
+        if !is_team_free {
+            mint_state.pool_sol_balance = mint_state
+                .pool_sol_balance
+                .checked_add(half_cost)
+                .ok_or(TobeError::MathOverflow)?;
+        }
 
-        msg!("Round {}: {} TOBE minted ({} to minter, {} to vault); 5 SOL → pool, 5 SOL → vault_sol",
-            round, token_units, minter_tokens, vault_tokens);
+        if is_team_free {
+            msg!("Round {}: TEAM FREE MINT (disclosed allocation {}/{}): {} TOBE minted ({} to team, {} to vault); 0 SOL paid",
+                round, mint_state.team_free_mints_used, TEAM_FREE_MINT_CAP, token_units, minter_tokens, vault_tokens);
+        } else {
+            msg!("Round {}: {} TOBE minted ({} to minter, {} to vault); 5 SOL → pool, 5 SOL → vault_sol",
+                round, token_units, minter_tokens, vault_tokens);
+        }
         match referrer {
             Some(r) => msg!("Referral: minter={}, referrer={}", ctx.accounts.minter.key(), r),
             None => msg!("Referral: minter={}, referrer=none", ctx.accounts.minter.key()),
@@ -1531,6 +1566,13 @@ pub struct MintState {
                                            //      preventing the early below-$1 drain arbitrage
     pub founder: Pubkey,                   // 32 — receives 50% of buy_from_vault proceeds
                                            //      (disclosed founder fee); other 50% → treasury
+
+    // ─── Phase 3: disclosed team allocation ───
+    pub team_wallet: Pubkey,               // 32 — set once at initialize, no setter; this wallet's
+                                           //      first TEAM_FREE_MINT_CAP mints are payment-free
+    pub team_free_mints_used: u64,         // 8  — free team mints consumed (cap: TEAM_FREE_MINT_CAP);
+                                           //      appended fields — run migrate_state_v2 after upgrade
+                                           //      to realloc + zero-init on existing deployments
 }
 
 // ─── Errors ───
