@@ -87,7 +87,7 @@ describe("tobestable", () => {
   // Disclosed team allocation wallet (mainnet: Eis6…5Bvf; tests use a throwaway
   // keypair since the real key can't sign here). Stored immutably at initialize.
   const teamWallet = anchor.web3.Keypair.generate();
-  const TEAM_FREE_MINT_CAP = 16;
+  const TEAM_FREE_MINT_CAP = 8;
   let teamTobe: anchor.web3.PublicKey;
   let tobeMint: anchor.web3.Keypair;
   let minterTobe: anchor.web3.PublicKey;
@@ -586,7 +586,7 @@ describe("tobestable", () => {
   // ── 15b. Disclosed Team Allocation ──
 
   it("team wallet mints free — no SOL debit, reserves untouched, same 50/50 split, counter increments", async () => {
-    // Fund the team wallet: tx fees + rent + the paid 17th mint in the next test
+    // Fund the team wallet: tx fees + rent + the paid 9th mint in the next test
     const fundTx = new anchor.web3.Transaction().add(
       anchor.web3.SystemProgram.transfer({
         fromPubkey: authority.publicKey,
@@ -647,7 +647,7 @@ describe("tobestable", () => {
     assert.equal(Number(teamAccount.amount), Math.floor(totalTokens / 2));
   });
 
-  it("cap enforced: free through mint 16, the 17th team mint pays like everyone", async () => {
+  it("cap enforced: free through mint 8, the 9th team mint pays like everyone", async () => {
     const teamMint = () =>
       program.methods
         .mintTobe(null)
@@ -666,14 +666,14 @@ describe("tobestable", () => {
         .signers([teamWallet])
         .rpc();
 
-    // Consume the remaining 15 free mints (one was used in the previous test)
+    // Consume the remaining 7 free mints (one was used in the previous test)
     for (let i = 2; i <= TEAM_FREE_MINT_CAP; i++) {
       await teamMint();
     }
     let state = await program.account.mintState.fetch(mintStatePda);
     assert.equal(state.teamFreeMintsUsed.toNumber(), TEAM_FREE_MINT_CAP);
 
-    // 17th team mint: cap exhausted — full 10 SOL payment applies
+    // 9th team mint: cap exhausted — full 10 SOL payment applies
     const teamBalBefore = await provider.connection.getBalance(teamWallet.publicKey);
     const poolBefore = await provider.connection.getBalance(poolSolReservePda);
     const vaultSolBefore = await provider.connection.getBalance(vaultSolReservePda);
@@ -684,7 +684,7 @@ describe("tobestable", () => {
     assert.equal(state.teamFreeMintsUsed.toNumber(), TEAM_FREE_MINT_CAP, "counter must not pass the cap");
 
     const teamBalAfter = await provider.connection.getBalance(teamWallet.publicKey);
-    assert.ok(teamBalBefore - teamBalAfter >= MINT_COST, "17th team mint must pay the full 10 SOL");
+    assert.ok(teamBalBefore - teamBalAfter >= MINT_COST, "9th team mint must pay the full 10 SOL");
     assert.equal(await provider.connection.getBalance(poolSolReservePda), poolBefore + MINT_COST / 2);
     assert.equal(await provider.connection.getBalance(vaultSolReservePda), vaultSolBefore + MINT_COST / 2);
   });

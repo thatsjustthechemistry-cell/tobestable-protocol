@@ -10,7 +10,7 @@ Anti-inflationary Solana SPL token with 1024 decreasing mint rounds and a permis
 - Of the 10 SOL paid:
   - **5 SOL → pool SOL reserve** (accumulates for future LP injection)
   - **5 SOL → vault SOL reserve** (backs the $1 floor defense)
-- Team allocation: a disclosed, hard-capped 16 free mint rounds to the team wallet (50/50 split like every mint, zero SOL paid, tagged on-chain). No other admin minting. No pre-mine outside those rounds. No mint payments to authority.
+- Team allocation: a disclosed, hard-capped 8 free mint rounds to the team wallet (50/50 split like every mint, zero SOL paid, tagged on-chain). No other admin minting. No pre-mine outside those rounds. No mint payments to authority.
 
 ## $1 Peg Mechanism
 

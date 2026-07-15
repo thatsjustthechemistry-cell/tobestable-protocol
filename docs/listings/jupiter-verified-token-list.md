@@ -55,7 +55,7 @@ description: |
   Anti-inflationary Solana token with 1024 decreasing mint rounds.
   50% to minter, 50% to vault. The vault enforces a two-way $1 peg via
   on-chain Pyth oracle — selling TOBE above $1, buying TOBE below $1.
-  Permanent locked liquidity on Raydium (LP tokens burned). A disclosed, hard-capped team allocation (16 free mint rounds);
+  Permanent locked liquidity on Raydium (LP tokens burned). A disclosed, hard-capped team allocation (8 free mint rounds);
   no other insiders; no SOL to the team from mints.
 
 # ─── Tags (Jupiter uses these for category filters) ───
