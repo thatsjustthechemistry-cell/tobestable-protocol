@@ -465,6 +465,32 @@ describe("tobestable", () => {
     // reflects only the unconsumed residual; vault_balance drops by measured TOBE.
   });
 
+  // ── 9b. arm_floor authority gate (H1 fix) ──
+  //
+  // Covers the Round-4 (Fable 5) H1 fix: arm_floor is authority-only. It used to be
+  // permissionless, letting anyone flash-skew the pool spot ratio across $1 to latch
+  // floor_active = true early and unlock a vault_sol_reserve drain. The gate is
+  // `constraint = authority.key() == mint_state.authority @ Unauthorized` on the
+  // ArmFloor.authority signer.
+  //
+  // Runs on DEVNET (like the arm_floor happy path above) because ArmFloor also takes
+  // the real Raydium pool vaults + a Pyth PriceUpdateV2 account that localnet lacks —
+  // so the authority rejection can't be exercised under `anchor test`.
+  //
+  // Runbook (extend scripts/arm-floor.js — it already wires the token0/token1 vaults
+  // from mint_state and posts a fresh Pyth SOL/USD update via PythSolanaReceiver):
+  //   1. Sign the arm_floor tx with a throwaway keypair that is NOT mint_state.authority.
+  //   2. Expect it to revert with Unauthorized (or ConstraintRaw).
+  //   3. Assert mint_state.floor_active is unchanged (false) afterward — the hard
+  //      invariant: a non-authority must never latch the floor.
+  //   4. (Optional) then arm with the real authority and confirm floor_active flips true.
+  //
+  // The pure TOBE≥$1 arming MATH is unit-tested in CI (no devnet needed): see the
+  // `arm_gate_*` cases in the Rust `pyth_math_tests` module (tobe_at_or_above_one_usd).
+  it.skip("rejects arm_floor from non-authority — Unauthorized (devnet)", async () => {
+    // See runbook above; requires devnet pool + Pyth, so it can't run under anchor test.
+  });
+
   // ── 10. Pause ──
 
   it("pauses minting", async () => {

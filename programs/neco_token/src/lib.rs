@@ -104,6 +104,22 @@ fn tobe_to_lamports_at_one_usd(tobe_raw: u64, sol_usd_price: i64, exponent: i32)
     u64::try_from(lamports).map_err(|_| error!(TobeError::MathOverflow))
 }
 
+/// Pure arming gate for `arm_floor`: has TOBE reached $1, given the pool's TOBE
+/// and SOL reserves and the SOL/USD price? TOBE/USD ≥ $1 ⇔ the USD value of the
+/// pool's SOL, expressed in TOBE at $1/TOBE, is at least the number of TOBE in
+/// the pool (both legs are 9-decimal, so the scale cancels). Factored out of
+/// `arm_floor` so the peg boundary is unit-testable without a live Pyth/Raydium
+/// runtime (the authority gate + account validation still live on the ix).
+fn tobe_at_or_above_one_usd(
+    pool_tobe: u64,
+    pool_sol: u64,
+    sol_usd_price: i64,
+    exponent: i32,
+) -> Result<bool> {
+    let tobe_at_one_usd = lamports_to_tobe_at_one_usd(pool_sol, sol_usd_price, exponent)?;
+    Ok(tobe_at_one_usd >= pool_tobe)
+}
+
 #[program]
 pub mod neco_token {
     use super::*;
@@ -508,12 +524,13 @@ pub mod neco_token {
         };
         require!(pool_tobe > 0 && pool_sol > 0, TobeError::EmptyPoolReserves);
 
-        // TOBE/USD ≥ $1  ⇔  the USD value of the pool's SOL, expressed in TOBE at
-        // $1/TOBE, is at least the number of TOBE in the pool. (Both legs are
-        // 9-decimal, so the scale cancels; we reuse the audited price helper.)
+        // TOBE/USD ≥ $1 gate — see `tobe_at_or_above_one_usd` (unit-tested). Uses
+        // the audited Pyth price helper; below peg reverts with PriceBelowPeg.
         let (price, exponent) = read_sol_usd_price(&ctx.accounts.pyth_price_update)?;
-        let tobe_at_one_usd = lamports_to_tobe_at_one_usd(pool_sol, price, exponent)?;
-        require!(tobe_at_one_usd >= pool_tobe, TobeError::PriceBelowPeg);
+        require!(
+            tobe_at_or_above_one_usd(pool_tobe, pool_sol, price, exponent)?,
+            TobeError::PriceBelowPeg
+        );
 
         mint_state.floor_active = true;
         msg!(
@@ -1648,7 +1665,9 @@ pub enum TobeError {
 
 #[cfg(test)]
 mod pyth_math_tests {
-    use super::{lamports_to_tobe_at_one_usd, tobe_to_lamports_at_one_usd};
+    use super::{
+        lamports_to_tobe_at_one_usd, tobe_at_or_above_one_usd, tobe_to_lamports_at_one_usd,
+    };
 
     #[test]
     fn lamports_to_tobe_at_150_usd_per_sol() {
@@ -1678,5 +1697,41 @@ mod pyth_math_tests {
     fn rejects_negative_price() {
         assert!(lamports_to_tobe_at_one_usd(1_000_000_000, -1, -8).is_err());
         assert!(tobe_to_lamports_at_one_usd(1_000_000_000, -1, -8).is_err());
+    }
+
+    // ── arm_floor peg gate ──
+    // At $150/SOL, 1 SOL backs 150 TOBE at $1. tobe_at_or_above_one_usd is the
+    // exact condition arm_floor requires before latching floor_active = true.
+
+    #[test]
+    fn arm_gate_true_at_peg() {
+        // Pool holds exactly what its SOL backs at $1 (150 TOBE, 1 SOL @ $150) →
+        // TOBE/USD == $1 → arm. Boundary is inclusive (>=), matching arm_floor.
+        assert!(
+            tobe_at_or_above_one_usd(150_000_000_000, 1_000_000_000, 15_000_000_000, -8).unwrap()
+        );
+    }
+
+    #[test]
+    fn arm_gate_true_above_peg() {
+        // Fewer TOBE (100) than the pool's SOL backs at $1 (150) → TOBE/USD > $1 → arm.
+        assert!(
+            tobe_at_or_above_one_usd(100_000_000_000, 1_000_000_000, 15_000_000_000, -8).unwrap()
+        );
+    }
+
+    #[test]
+    fn arm_gate_false_below_peg() {
+        // More TOBE (151) than the SOL backs at $1 (150) → TOBE/USD < $1 → do NOT arm.
+        // This is the flash-manipulation case the H1 fix + this gate must reject.
+        assert!(
+            !tobe_at_or_above_one_usd(151_000_000_000, 1_000_000_000, 15_000_000_000, -8).unwrap()
+        );
+    }
+
+    #[test]
+    fn arm_gate_rejects_bad_price() {
+        // A non-positive SOL price must surface an error, never silently arm the floor.
+        assert!(tobe_at_or_above_one_usd(1, 1_000_000_000, -1, -8).is_err());
     }
 }
