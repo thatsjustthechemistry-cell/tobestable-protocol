@@ -60,7 +60,7 @@ async function main() {
   // proceeds. Defaults to the signer; pass --founder <PUBKEY> for a dedicated
   // wallet. This is a DISCLOSED founder fee (see FAQ / SECURITY.md).
   const founderPk = new PublicKey(founder || payer.publicKey.toBase58());
-  // Disclosed team allocation wallet: its first 16 mints are payment-free
+  // Disclosed team allocation wallet: its first 8 mints are payment-free
   // (hard-capped in the program, no setter). Disclosed in FAQ + live feed.
   const TEAM_WALLET = new PublicKey('Eis6SPak12JXqunZqLqgHneomygF1ouuoRk5PFXB5Bvf');
 
@@ -78,7 +78,7 @@ async function main() {
   console.log('  Signer/Payer:  ', payer.publicKey.toBase58(), `(${(balance / 1e9).toFixed(4)} SOL)`);
   console.log('  Treasury:      ', treasuryPk.toBase58(), treasuryPk.equals(payer.publicKey) ? '(= signer, default)' : '(custom)');
   console.log('  Founder (50%): ', founderPk.toBase58(), founderPk.equals(payer.publicKey) ? '(= signer, default)' : '(custom)');
-  console.log('  Team wallet:   ', TEAM_WALLET.toBase58(), '(16 free mints, disclosed)');
+  console.log('  Team wallet:   ', TEAM_WALLET.toBase58(), '(8 free mints, disclosed)');
 
   if (balance < 0.1 * 1e9) {
     console.error('❌ Balance too low. Need ≥0.1 SOL for init rent + fees.');

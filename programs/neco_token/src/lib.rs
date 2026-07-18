@@ -29,7 +29,7 @@ const MAX_ROUNDS: u64 = 1024;
 // wallet pays like any other minter. There is no setter — the wallet cannot be
 // changed after initialize. Free mints are tagged in program logs and disclosed
 // on the site (FAQ + live feed "team" tag).
-const TEAM_FREE_MINT_CAP: u64 = 16;
+const TEAM_FREE_MINT_CAP: u64 = 8;
 const TOKENS_PER_UNIT: u64 = 1024;
 const TOBE_DECIMALS_FACTOR: u64 = 1_000_000_000; // 9 decimals
 const LP_LOCK_DURATION: i64 = 2 * 365 * 24 * 60 * 60; // 2 years in seconds
