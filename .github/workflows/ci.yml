@@ -134,11 +134,18 @@ jobs:
         #
         # `anchor keys sync` rewrites declare_id!/Anchor.toml to match the
         # generated keypair. Ephemeral, CI-only — never committed.
+        #
+        # --provider.cluster localnet is REQUIRED on the sync too: without it
+        # `anchor keys sync` reads [provider] cluster = "mainnet" and updates
+        # declare_id! + [programs.mainnet] while leaving [programs.localnet]
+        # pointing at the old id — which the test then deploys against, giving
+        # DeclaredProgramIdMismatch (4100).
         run: |
           anchor build
-          anchor keys sync
+          anchor keys sync --provider.cluster localnet
           echo "--- program id after sync ---"
           anchor keys list
+          grep -A1 '\[programs.localnet\]' Anchor.toml
 
       - name: anchor test (localnet)
         # --provider.cluster localnet is REQUIRED: Anchor.toml sets cluster =
