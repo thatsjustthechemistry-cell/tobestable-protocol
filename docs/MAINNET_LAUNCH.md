@@ -194,6 +194,7 @@ Once `pool_sol_balance` ≥ 1 SOL. **Signature now takes `max_tobe_to_pair: u64`
 | `arm_floor` | `cbf35c2766bfc696` | — | Step 11 (council 2-of-3, authority-only) |
 | `flush_lp_to_raydium` | `1324c3f558c78cd9` | `max_tobe_to_pair: u64` | Step 10 (permissionless) |
 | `update_treasury` | `3c10f342603bfe83` | `new_treasury: pubkey` | Redirect the DAO's 50% of `buy_from_vault` proceeds |
+| `update_founder` | `5a715db1dc38ff70` | `new_founder: pubkey` | Redirect the founder's 50% of `buy_from_vault` proceeds (authority-only; rejects the zero pubkey). Uses the same accounts as `update_treasury`. |
 | `update_founder` | `5a715db1dc38ff70` | `new_founder: pubkey` | Redirect the founder's 50% of `buy_from_vault` proceeds |
 | `pause` | `d316ddfb4a79c12f` | — | Emergency stop (now gates mint + all fund-moving ix) |
 | `unpause` | `a99004260a8dbcff` | — | Resume |
