@@ -6,6 +6,27 @@
 
 > ⚠️ This is a self-administered AI-assisted audit, **not** a substitute for a professional audit + fuzzing. It catches code-signature bug classes (missing constraints, signer/authority gaps, arithmetic, oracle handling, account substitution, CPI signing). It is weaker on deep economic game-theory and live cross-program edge cases. See "Coverage gaps".
 
+## 🔴 Scope boundary — code added AFTER this audit (read first)
+
+**This report covers `lib.rs` as of commit `caf19de` (2026-07-02).** Everything below that line landed *afterwards* and is **not covered by any round of this audit**:
+
+| Commit | Change | Touches money? |
+|---|---|---|
+| `29e75bc` | `buy_from_vault` proceeds split 50/50 (DAO treasury / founder) | **Yes** — adds two `system_program::transfer` calls |
+| `b47fc54` | `referral` — optional referrer logged via `msg!` | No (instruction data only, no amounts) |
+| `03ee3a5` | Disclosed team allocation — free mints, new immutable state fields | **Yes** — branches around the 10 SOL payment |
+| `96e365a` | Team free-mint cap 16 → 8 | Constant only |
+| `3cdcd65` | `arm_floor` arming math extracted for unit tests (behaviour-identical) | No |
+
+That is **~201 added lines** in the core program, including two paths that move real SOL. Anyone relying on this report should know it does **not** describe the program that is being shipped.
+
+**What has been done on that delta instead (weaker assurance — do not read as an audit):**
+- An adversarial review pass (2026-07-18) checked the highest-risk hypotheses: whether `buy_from_vault`'s `treasury`/`founder` destinations could be attacker-substituted for a free vault drain (they are constrained — the M1 bug class is blocked), split exactness, the free-mint signer gate and cap, round-counter overflow, and `MintState` sizing. No exploitable defect was found.
+- The `arm_floor` peg-boundary math has Rust unit tests running in CI (`pyth_math_tests::arm_gate_*`).
+- ⚠️ The mocha integration suite has **never passed** — it had never been executed at all until 2026-07-18, and is still being brought up. So none of the delta has passing end-to-end coverage.
+
+**Recommendation before mainnet:** re-audit the delta — at minimum a focused adversarial pass on `buy_from_vault`'s split and the `is_team_free` branch. Note that Round 1 of this very audit *rejected* the M1 `seed_pool` finding as a non-issue, and Round 4 found it was real. Self-audit passes on this codebase have already missed a genuine bug once.
+
 ## Status summary
 
 | # | Severity | Finding | Status |

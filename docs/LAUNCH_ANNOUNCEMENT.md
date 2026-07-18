@@ -40,6 +40,8 @@ Locked in code forever: the 1,024-round supply curve, the $1 peg math, the burne
 **9/ Audited (honestly described)**
 The program was self-audited across 8 vulnerability classes with adversarial verification, and every finding fixed (report in the repo). This is an AI-assisted self-audit, **not** a paid professional audit — I'm telling you that rather than implying a clean bill of health I didn't buy.
 
+Two more things I won't bury: that audit covers the program as of July 2, and three features landed after it (founder revenue split, team allocation, referral logging) — ~200 lines, two of which move SOL. They've had an adversarial review but not a full audit round; the scope boundary is written into the report itself. And the audit found a High severity bug in round 4 that round 1 had wrongly dismissed — which is exactly why I don't want you treating "self-audited" as "safe."
+
 **10/ Verify everything (don't trust, check)**
 - Program: `Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX`
 - TOBE mint: `<MINT — from launch>`
