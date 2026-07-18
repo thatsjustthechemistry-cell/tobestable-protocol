@@ -30,7 +30,11 @@ cluster = "mainnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
+# ts-mocha is unmaintained and breaks on modern mocha/Node: mocha loads .ts via
+# its ESM path, so ts-mocha's CommonJS ts-node hook never applies and the
+# extensionless `../target/types/neco_token` import fails with ERR_MODULE_NOT_FOUND.
+# tsx handles TS under both ESM and CJS and resolves extensionless imports.
+test = "npx mocha --import tsx -t 1000000 \"tests/**/*.ts\""
 
 [test]
 startup_wait = 60000

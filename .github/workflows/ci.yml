@@ -78,3 +78,53 @@ jobs:
 
       - name: anchor build
         run: anchor build
+
+  # ── Integration suite: actually RUNS tests/neco_token.ts against a local
+  #    validator. Until this job existed the mocha suite had never been executed
+  #    anywhere — not in CI, and not locally (solana-test-validator can't create
+  #    symlinks on the maintainer's Windows box, OS error 1314). Written tests
+  #    that never run are documentation, not coverage, so this closes that gap.
+  #
+  #    NOT a required status check until it has been green at least once — it is
+  #    informational first, then promote it in branch protection.
+  anchor-test:
+    name: anchor test (integration suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install system deps for Anchor CLI
+        run: sudo apt-get update && sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev
+
+      - name: Install Solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor CLI (0.32.1)
+        run: cargo install --git https://github.com/coral-xyz/anchor --tag v0.32.1 anchor-cli --locked
+
+      - name: Install node deps
+        run: npm ci || npm install
+
+      - name: Generate a local wallet
+        # Anchor.toml points provider.wallet at ~/.config/solana/id.json; CI has none.
+        run: |
+          mkdir -p "$HOME/.config/solana"
+          solana-keygen new --no-bip39-passphrase --force -o "$HOME/.config/solana/id.json"
+
+      - name: anchor test (localnet)
+        # --provider.cluster localnet is REQUIRED: Anchor.toml sets cluster =
+        # "mainnet" for the deploy runbook, and we must never point tests there.
+        run: anchor test --provider.cluster localnet
