@@ -147,7 +147,38 @@ jobs:
           anchor keys list
           grep -A1 '\[programs.localnet\]' Anchor.toml
 
-      - name: anchor test (localnet)
+      - name: Start a validator and do a REAL deploy (so RA-1 can pass)
+        # `anchor test` preloads workspace programs into the validator with
+        # --bpf-program (it does this whenever [test.validator] is configured,
+        # which we need for the Metaplex clone). A preloaded program's upgrade
+        # authority is NOT the test wallet, so initialize's RA-1 constraint
+        #   program_data.upgrade_authority_address == Some(authority.key())
+        # can never be satisfied — every run died at test #1 with Unauthorized.
+        #
+        # So start the validator ourselves (still cloning Metaplex, which
+        # initialize needs for the metadata CPI) and do a real upgradeable
+        # deploy with the CI wallet as the upgrade authority.
+        run: |
+          solana config set --url http://127.0.0.1:8899
+          solana-test-validator -r --quiet \
+            --bind-address 127.0.0.1 \
+            --url https://api.mainnet-beta.solana.com \
+            --clone metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s &
+          for i in $(seq 1 90); do
+            solana cluster-version >/dev/null 2>&1 && break || sleep 2
+          done
+          solana cluster-version
+          solana airdrop 100
+          solana program deploy target/deploy/neco_token.so \
+            --program-id target/deploy/neco_token-keypair.json \
+            --upgrade-authority "$HOME/.config/solana/id.json"
+          echo "--- deployed program / upgrade authority ---"
+          solana program show "$(solana address -k target/deploy/neco_token-keypair.json)"
+          echo "--- test wallet (must match the upgrade authority above) ---"
+          solana address
+
+      - name: anchor test (against the running validator)
+        # --skip-local-validator / --skip-deploy: started + deployed above.
         # --provider.cluster localnet is REQUIRED: Anchor.toml sets cluster =
-        # "mainnet" for the deploy runbook, and we must never point tests there.
-        run: anchor test --provider.cluster localnet
+        # "mainnet" for the deploy runbook, and tests must never point there.
+        run: anchor test --skip-local-validator --skip-deploy --provider.cluster localnet
