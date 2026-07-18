@@ -185,8 +185,34 @@ allocation, cap 16→8, `arm_floor` math extraction). See "Scope boundary" at th
 
 | # | Severity | Finding | Status |
 |---|----------|---------|--------|
-| F1 | **Medium** | `buy_from_vault` lets the **founder buy vault TOBE at a 50% discount**, unbounded by any vault floor | ⚠️ Open |
+| F1 | **Medium** | `buy_from_vault` lets the **founder buy vault TOBE at a 50% discount**, unbounded by any vault floor | ⚠️ **Mitigated, not eliminated** — see "F1 fix" |
 | F2 | Low | `buy_from_vault` has **no price gate** despite being documented as an above-$1 ceiling | ⚠️ Open |
+
+### F1 fix — what it does and does NOT do
+
+**Applied:** `buy_from_vault` now enforces the same 30% vault floor that has always
+guarded `flush_lp_to_raydium`, and additionally requires the pool to be configured
+(the floor baseline `vault_tobe_at_config` is 0 until `set_pool_config` runs, so
+without this the floor would be 0 in that window and permit a full drain). Both
+call sites now share one tested helper, `vault_withdrawal_within_floor`, so a
+security-critical bound cannot drift between two copies. Unit-tested in CI
+(`pyth_math_tests::vault_floor_*`).
+
+**Residual — read this before treating F1 as closed.** The floor *bounds* the
+extraction; it does not remove the discount. The founder can still buy vault TOBE
+at an effective 50% off, and can still do so for **70% of the vault** before the
+floor stops them. On a full 1,024-round supply that is a large amount of
+protocol-owned TOBE acquirable at half price.
+
+Fully closing F1 requires a change to the fee *model*, not another bound — e.g.
+routing `founder_cut` to a timelocked/DAO-controlled account so it cannot be
+recycled within the same transaction, or not paying the cut when the buyer is the
+founder (noting a bare `buyer != founder` check is bypassable with a second
+wallet, so this only works combined with the timelock).
+
+**The disclosure gap is also still open.** Public copy still frames the founder cut
+as a fee on other people's arbitrage and does not mention that the founder can be
+the buyer at half price.
 
 ### F1 — Founder self-dealing via `buy_from_vault` (Medium)
 
