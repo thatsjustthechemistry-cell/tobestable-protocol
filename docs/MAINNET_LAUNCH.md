@@ -18,16 +18,22 @@
 
 ## Pre-launch checklist (do BEFORE Step 1)
 
-- [ ] **Fund deployer** `BzvTL4PY...` with **~6 SOL** mainnet: `solana balance --url mainnet-beta`. Deploy rent for the current 650 KB program is **~4.53 SOL** (recomputed 2026-07 — the program grew with Phase 2, so the old "3.4 SOL total" is stale). 6 SOL covers deploy + init + a failed-deploy retry with headroom; 5 SOL leaves almost no margin.
-- [ ] **Back up `target/deploy/neco_token-keypair.json`** to 2 offline locations (controls the program ID)
-- [ ] **Fund council wallet** `8aVTS...` (currently 0 SOL) so it can pay fees to vote
+> **Funding status — live-verified on mainnet-beta 2026-07-18.** The one hard blocker is the deployer at 0 SOL. Total to clear all funding gates: **≈ 6.13 SOL** (mostly the deployer). Re-check with `solana balance <PUBKEY> --url mainnet-beta` before sending.
+
+- [ ] **🔴 Fund deployer** `BzvTL4PY...` with **~6 SOL** — *currently 0 SOL (2026-07-18), send the full ~6.* Deploy rent for the current 650 KB program is **~4.53 SOL** (recomputed 2026-07; the old "3.4 SOL total" is stale). 6 SOL covers deploy + init + a failed-deploy retry with headroom; 5 leaves almost no margin. **This gates Step 1 — nothing deploys until it's funded.**
+- [ ] **Fund the 3 council wallets** so each can pay fees to vote (live balances 2026-07-18):
+  - `Eis6...5Bvf` — 0.0043 SOL → send **~0.05** (also the disclosed team-allocation wallet: it does the day-one free mints, so it needs fee + ATA-rent headroom)
+  - `8aVTS...9vwH2` — 0.0025 SOL → send **~0.05**
+  - `EnRAy...YuiXo` — 0 SOL → send **~0.03**
+- [ ] **Back up `target/deploy/neco_token-keypair.json`** to 2 offline locations (controls the program ID) — *memory notes this is unconfirmed; verify a real offline copy exists.*
 - [ ] **Council key isolation** — confirm the 3 council keys live on separate devices (or accept "bootstrap multisig" with a written 30-day hardening plan)
-- [ ] **Governance rehearsal on devnet** — `npm install @solana/spl-governance`, then run the full propose → vote → execute → verify cycle on a devnet realm using `scripts/propose-accept-authority.js`
+- [x] **Governance propose → vote → execute rehearsed on devnet — ✅ DONE 2026-07.** Proven twice: the Step 5.5 upgrade-authority cycle (below) and a native-treasury `set_pool_config` council proposal (2-of-3 vote → execute → CPI signing all confirmed). `@solana/spl-governance` is a declared dep.
 - [x] **🔴 Upgrade-authority handoff rehearsed on devnet (Step 5.5) — ✅ DONE 2026-07.** Full cycle proven on the devnet program (create governance over program → `set-upgrade-authority --skip-new-upgrade-authority-signer-check` to the governance PDA → 2-of-3 Upgrade Program proposal → execute → real upgrade landed → reversed). The verified flow + gotchas are in Step 5.5. **On mainnet you still MUST do Step 5.5 for real** — both `mint_state.authority` (Step 5) AND the program upgrade authority (Step 5.5) must go to the DAO; shipping with single-key upgrade authority is the backdoor the FAQ says doesn't exist. Confirm the exact `<DAO_PROGRAM_GOVERNANCE>` target (a wrong target permanently bricks upgrades).
+- [ ] **arm_floor authority gate — devnet-prove before mainnet.** The H1 authority gate now has Rust unit tests for the arming *math* (CI-verified, `pyth_math_tests::arm_gate_*`), but the *authorization* rejection can't run under localnet (needs real Pyth+Raydium). Run it once on devnet: sign `arm_floor` with a non-authority keypair (extend `scripts/arm-floor.js`) → expect `Unauthorized`, and confirm `floor_active` stays false. Runbook is in `tests/neco_token.ts` (§9b).
 - [ ] **Build with the current toolchain** (the one that builds locally / in CI — do NOT pin an old Solana, it resurfaces the `edition2024` build failure)
-- [ ] Public announcement drafted
-- [ ] ≥1 day-one minter lined up (10 SOL each)
-- [ ] (Optional but recommended) branch protection enabled on `main` requiring the `cargo check + test` CI check
+- [x] **Public announcement drafted** — 10-tweet launch blast in `tobe-mint/docs/launch-tweets.md` (discloses team allocation + founder revenue; website + Telegram links).
+- [x] **Day-one mint covered** — obsoleted the "line up an external 10-SOL minter": the disclosed team allocation lets `Eis6...` free-mint immediately after Step 2, so it *is* the day-one mint (just fund it for fees, above).
+- [x] **Branch protection enabled on `main`** — requires the `cargo check + test` CI check (strict mode); force-push + deletion blocked. Done 2026-07-08. (`enforce_admins` still false — admins can bypass.)
 
 ## Step 1 — Deploy
 
