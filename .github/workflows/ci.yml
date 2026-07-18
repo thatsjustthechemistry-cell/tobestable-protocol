@@ -124,6 +124,22 @@ jobs:
           mkdir -p "$HOME/.config/solana"
           solana-keygen new --no-bip39-passphrase --force -o "$HOME/.config/solana/id.json"
 
+      - name: Sync the program id to the CI-generated keypair
+        # declare_id! is the MAINNET program id (Eekx6ftd...) and its keypair is
+        # correctly NOT in the repo, so CI can never deploy at that address —
+        # `anchor build` generates a fresh keypair instead. Without a sync the
+        # deployed program and the client disagree, and initialize's RA-1 check
+        # (program_data.upgrade_authority_address == authority) fails with
+        # Unauthorized, cascading into every downstream test.
+        #
+        # `anchor keys sync` rewrites declare_id!/Anchor.toml to match the
+        # generated keypair. Ephemeral, CI-only — never committed.
+        run: |
+          anchor build
+          anchor keys sync
+          echo "--- program id after sync ---"
+          anchor keys list
+
       - name: anchor test (localnet)
         # --provider.cluster localnet is REQUIRED: Anchor.toml sets cluster =
         # "mainnet" for the deploy runbook, and we must never point tests there.
