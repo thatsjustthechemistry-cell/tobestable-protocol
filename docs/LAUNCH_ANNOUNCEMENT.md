@@ -30,8 +30,9 @@ Below $1, anyone can buy cheap TOBE and sell it to the vault at $1, drawn from a
 Half of every mint's SOL accumulates and is deposited into a Raydium TOBE/SOL pool — and the LP tokens are **burned**. The liquidity is locked forever; nobody, including me, can pull it.
 
 **7/ Governance (honest)**
-Program authority and treasury are held by a 2-of-3 Realms multisig from day one — no single key can mint extra, drain the vault, or change the rules. `<<YOUR VOICE — state plainly whether the 3 council keys are all yours (bootstrap) or include others, and your hardening plan. Default below.>>`
-> The council is currently a 2-of-3 self-multisig (bootstrap); I'm hardening to hardware-isolated keys within 30 days, via on-chain vote.
+Program authority and treasury are held by a 2-of-3 Realms multisig from day one, so no single key can mint extra, drain the vault, or change the rules.
+
+**The caveat, stated plainly:** all three council keys are currently mine, held on separate devices. That is a *bootstrap* multisig — it protects against one device being compromised, not against me — and it is not multi-party governance yet. Moving to independent key holders happens by on-chain vote you can watch. I'd rather you hear that from me than find it yourself.
 
 **8/ What's locked vs changeable**
 Locked in code forever: the 1,024-round supply curve, the $1 peg math, the burned liquidity. Changeable only by 2-of-3 council vote: treasury address, pool config, emergency pause. All on-chain, all verifiable.
