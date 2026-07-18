@@ -107,7 +107,7 @@ Anti-inflationary Solana token with a two-way $1 USD peg defended via Pyth oracl
 - [ ] Program source matches deployed bytecode (verifiable via `solana program show` + bytecode diff)
 - [ ] Liquidity pool: `[FILL: MAINNET_POOL_ADDRESS]` on Raydium CPMM
 - [ ] LP tokens permanently burned via `flush_lp_to_raydium` instruction (verifiable on-chain)
-- [ ] Authority: `[FILL: SQUADS_MULTISIG_VAULT_PUBKEY]` (Squads V4 multisig, [N]-of-[M] threshold)
+- [ ] Authority: `Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC` (Realms / SPL Governance, 2-of-3 council)
 - [ ] Token metadata: https://tobestable.com/token-metadata.json (Metaplex-compliant)
 - [ ] Logo: https://tobestable.com/logo.png (256x256 PNG)
 

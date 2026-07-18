@@ -70,7 +70,7 @@ The vault enforces a two-way $1 USD peg via on-chain Pyth oracle:
 
 Liquidity is permanently locked: anyone can call flush_lp_to_raydium to deposit accumulated SOL + matching TOBE into the Raydium pool. The LP tokens received are burned in the same atomic transaction. Liquidity cannot be removed by anyone, ever.
 
-Team allocation: 8 free mint rounds, hard-capped in the contract and disclosed (≈ 0.8% of rounds). No other insiders; beyond the cap the founder mints under the same rules as everyone else. Smart contracts open-sourced on GitHub. Authority controlled by Squads multisig.
+Team allocation: 8 free mint rounds, hard-capped in the contract and disclosed (≈ 0.8% of rounds). No other insiders; beyond the cap the founder mints under the same rules as everyone else. Smart contracts open-sourced on GitHub. Authority controlled by a 2-of-3 Realms (SPL Governance) council multisig at Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC.
 ```
 
 ### Section 3: Token Contract Information

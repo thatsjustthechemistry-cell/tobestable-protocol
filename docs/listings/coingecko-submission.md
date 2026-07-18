@@ -86,7 +86,7 @@ How it works:
 
 • Team allocation: 8 free mint rounds, hard-capped in the contract and disclosed (≈ 0.8% of rounds). No other insiders; beyond the cap the founder mints under the same rules as everyone else.
 
-Built on Anchor framework. Smart contract source open on GitHub. Authority controlled by Squads multisig.
+Built on Anchor framework. Smart contract source open on GitHub. Authority controlled by a 2-of-3 Realms (SPL Governance) council multisig at Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC.
 ```
 
 ### Section 4: Supply Information
@@ -225,7 +225,7 @@ CoinGecko reviewers may email asking:
 | "Where is the founder allocation?" | "Zero. Founder mints under the same 1024-round mechanism as anyone else. Verifiable on-chain — see SECURITY.md `mint_tobe` instruction." |
 | "Why do you call this a stablecoin if the price isn't $1 at launch?" | "TOBESTABLE is an algorithmic stablecoin that uses an anti-inflationary curve to converge toward $1, then defends the peg via two-way arbitrage backed by an on-chain SOL reserve. The mechanism is fully on-chain and permissionless. We disclose openly that the price ramps to $1 over the 1024-round mint, not at TGE." |
 | "What backs the peg?" | "Two layers: (1) algorithmic — anti-inflationary supply curve makes scarcity drive convergence; (2) reserve — vault SOL reserve (up to 5,120 SOL) backs the floor via `sell_to_vault`. Both verifiable on-chain." |
-| "Who controls the authority?" | "After mainnet migration: a Squads multisig at `[FILL: SQUADS_VAULT]`, threshold [FILL: M]-of-[FILL: N]. Verifiable via `verify-multisig.js` script in the repo." |
+| "Who controls the authority?" | "A 2-of-3 Realms (SPL Governance) council multisig — vault `Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC`, DAO https://v2.realms.today/dao/9VUbq5QHSPezGPseqY1kgrwSVLGtndk3XT1y3dfMB5o, council mint `2ZdbLGkKi1Zvk5dKLqcY5UBcDdJVss8u2tGmMnN3gRHN` (supply 3). Verifiable via `verify-multisig.js` in the repo. Disclosed: all three council keys are currently founder-held on separate devices — a bootstrap multisig, not yet multi-party governance." |
 
 ## Submission checklist (go/no-go)
 
