@@ -332,10 +332,17 @@ describe("tobestable", () => {
 
     // Referral is logged on-chain (msg!), not stored in state — confirm it
     // shows up in this transaction's program log.
-    const txDetails = await provider.connection.getTransaction(tx, {
-      commitment: "confirmed",
-      maxSupportedTransactionVersion: 0,
-    });
+    // getTransaction returns null until the tx is indexed at this commitment —
+    // fetching immediately after .rpc() is a race that throws on .meta. Poll.
+    let txDetails = null;
+    for (let i = 0; i < 30 && txDetails === null; i++) {
+      txDetails = await provider.connection.getTransaction(tx, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0,
+      });
+      if (txDetails === null) await new Promise((r) => setTimeout(r, 500));
+    }
+    assert.ok(txDetails, "mint transaction should become retrievable");
     const logs = txDetails.meta.logMessages.join("\n");
     assert.ok(
       logs.includes(referrer.toString()),

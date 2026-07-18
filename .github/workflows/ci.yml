@@ -78,3 +78,121 @@ jobs:
 
       - name: anchor build
         run: anchor build
+
+  # ── Integration suite: actually RUNS tests/neco_token.ts against a local
+  #    validator. Until this job existed the mocha suite had never been executed
+  #    anywhere — not in CI, and not locally (solana-test-validator can't create
+  #    symlinks on the maintainer's Windows box, OS error 1314). Written tests
+  #    that never run are documentation, not coverage, so this closes that gap.
+  #
+  #    NOT a required status check until it has been green at least once — it is
+  #    informational first, then promote it in branch protection.
+  anchor-test:
+    name: anchor test (integration suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install system deps for Anchor CLI
+        run: sudo apt-get update && sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev
+
+      - name: Install Solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor CLI (0.32.1)
+        run: cargo install --git https://github.com/coral-xyz/anchor --tag v0.32.1 anchor-cli --locked
+
+      - name: Install node deps
+        run: npm ci || npm install
+
+      - name: Generate a local wallet
+        # Anchor.toml points provider.wallet at ~/.config/solana/id.json; CI has none.
+        run: |
+          mkdir -p "$HOME/.config/solana"
+          solana-keygen new --no-bip39-passphrase --force -o "$HOME/.config/solana/id.json"
+
+      - name: Sync the program id to the CI-generated keypair
+        # declare_id! is the MAINNET program id (Eekx6ftd...) and its keypair is
+        # correctly NOT in the repo, so CI can never deploy at that address —
+        # `anchor build` generates a fresh keypair instead. Without a sync the
+        # deployed program and the client disagree, and initialize's RA-1 check
+        # (program_data.upgrade_authority_address == authority) fails with
+        # Unauthorized, cascading into every downstream test.
+        #
+        # `anchor keys sync` rewrites declare_id!/Anchor.toml to match the
+        # generated keypair. Ephemeral, CI-only — never committed.
+        #
+        # --provider.cluster localnet is REQUIRED on the sync too: without it
+        # `anchor keys sync` reads [provider] cluster = "mainnet" and updates
+        # declare_id! + [programs.mainnet] while leaving [programs.localnet]
+        # pointing at the old id — which the test then deploys against, giving
+        # DeclaredProgramIdMismatch (4100).
+        run: |
+          anchor build
+          anchor keys sync --provider.cluster localnet
+          # REQUIRED second build: `keys sync` rewrites declare_id! in the source
+          # but does not touch the already-built .so, which still carries the old
+          # id ("Please rebuild the program to update the generated artifacts").
+          # We preload that .so into the validator below, so if we skip this the
+          # program's baked-in declare_id != the address it is loaded at and every
+          # instruction fails with DeclaredProgramIdMismatch (4100).
+          anchor build
+          echo "--- program id after sync + rebuild ---"
+          anchor keys list
+          grep -A1 '\[programs.localnet\]' Anchor.toml
+
+      - name: Start a validator and do a REAL deploy (so RA-1 can pass)
+        # `anchor test` preloads workspace programs into the validator with
+        # --bpf-program (it does this whenever [test.validator] is configured,
+        # which we need for the Metaplex clone). A preloaded program's upgrade
+        # authority is NOT the test wallet, so initialize's RA-1 constraint
+        #   program_data.upgrade_authority_address == Some(authority.key())
+        # can never be satisfied — every run died at test #1 with Unauthorized.
+        #
+        # So start the validator ourselves (still cloning Metaplex, which
+        # initialize needs for the metadata CPI) and do a real upgradeable
+        # deploy with the CI wallet as the upgrade authority.
+        #
+        # A manual `solana program deploy` does NOT work here: cargo-build-sbf
+        # emits a newer SBPF version than the validator's loader enables
+        #   "Detected sbpf_version required by the executable which are not enabled"
+        # Preloading sidesteps that loader gate, so use the validator's own
+        # --upgradeable-program, which preloads AND writes a real ProgramData
+        # account with an upgrade authority we choose.
+        run: |
+          solana config set --url http://127.0.0.1:8899
+          PROGRAM_ID=$(solana address -k target/deploy/neco_token-keypair.json)
+          WALLET=$(solana address)
+          echo "program: $PROGRAM_ID"
+          echo "wallet : $WALLET  (will be the upgrade authority)"
+          solana-test-validator -r --quiet \
+            --bind-address 127.0.0.1 \
+            --url https://api.mainnet-beta.solana.com \
+            --clone-upgradeable-program metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s \
+            --upgradeable-program "$PROGRAM_ID" target/deploy/neco_token.so "$WALLET" &
+          for i in $(seq 1 90); do
+            solana cluster-version >/dev/null 2>&1 && break || sleep 2
+          done
+          solana cluster-version
+          solana airdrop 100
+          echo "--- program + upgrade authority (must equal the wallet above) ---"
+          solana program show "$PROGRAM_ID"
+
+      - name: anchor test (against the running validator)
+        # --skip-local-validator / --skip-deploy: started + deployed above.
+        # --provider.cluster localnet is REQUIRED: Anchor.toml sets cluster =
+        # "mainnet" for the deploy runbook, and tests must never point there.
+        run: anchor test --skip-local-validator --skip-deploy --provider.cluster localnet
