@@ -212,11 +212,52 @@ call sites now share one tested helper, `vault_withdrawal_within_floor`, so a
 security-critical bound cannot drift between two copies. Unit-tested in CI
 (`pyth_math_tests::vault_floor_*`).
 
-**Residual — read this before treating F1 as closed.** The floor *bounds* the
-extraction; it does not remove the discount. The founder can still buy vault TOBE
-at an effective 50% off, for up to **70% of the vault** before the floor stops
-them. On a full 1,024-round supply that is a large amount of protocol-owned TOBE
-acquirable at half price.
+### ⚠️ Correction (same day): the first F1 fix did not bound what it claimed
+
+The initial mitigation reused `flush_lp_to_raydium`'s existing floor, which is
+anchored to `vault_tobe_at_config` — a snapshot of the vault balance taken **once**
+at `set_pool_config` and never updated (`set_pool_config` is one-shot). The vault
+keeps growing with every mint while that baseline stays frozen, so the floor decays
+from a percentage into a rounding error:
+
+| Config at round | Floor (fixed) | Vault @ r1024 | Actually extractable |
+|---|---|---|---|
+| 20 | 3.12M | 268.7M | **98.8%** |
+| 100 | 14.97M | 268.7M | 94.4% |
+
+The runbook configures the pool at Step 9, immediately after launch — the worst
+case. "Bounded to 70%" was wrong; it was closer to unbounded.
+
+**Anchoring to the current balance would have been worse still** — it is
+*ratchetable*: each withdrawal lowers the balance and therefore the next floor
+(1000 → 300 → 90 → 27 → …), draining to zero by repetition rather than in one go.
+
+**Fix:** `buy_from_vault` now anchors to `total_minted / 2` — what the vault would
+hold had nothing ever been withdrawn. `total_minted` is monotonic, so the floor
+only ever rises and no sequence of withdrawals can lower it. This is a true
+cumulative bound, and the protected share holds at exactly 30% at every scale:
+
+| Round | Vault | Old floor | New floor | Old extractable | New extractable |
+|---|---|---|---|---|---|
+| 100 | 49.9M | 3.12M | 14.97M | 93.8% | **70.0%** |
+| 500 | 198.3M | 3.12M | 59.48M | 98.4% | **70.0%** |
+| 1024 | 268.7M | 3.12M | 80.61M | 98.8% | **70.0%** |
+
+`flush_lp_to_raydium` deliberately keeps the snapshot baseline: it converts vault
+TOBE into Raydium liquidity whose LP receipt is **burned**, so nothing leaves the
+protocol. Tightening it would throttle LP injection to prevent a "drain" that is
+not one. That asymmetry is documented at both call sites; re-audit it if `flush`
+ever gains a caller-chosen recipient.
+
+Unit-tested in CI: `vault_floor_monotonic_baseline_cannot_be_ratcheted_down` pins
+the ratchet failure, `vault_floor_rises_as_minting_continues` pins the 30% share
+across scales (15 tests passing).
+
+**Residual — F1 is still mitigated, not closed.** The floor now genuinely bounds
+extraction at 70% of the vault, but it does not remove the discount: the founder
+can still acquire that 70% at an effective 50% off. Closing it fully requires a
+change to the fee *model* (timelocked or DAO-held `founder_cut`), which the
+founder has reviewed and declined — the 50/50 split is disclosed and retained.
 
 What the **F2 price gate** additionally removes is the *value-destroying* half of
 this: the founder can no longer do it while TOBE trades below $1, which was the
