@@ -21,11 +21,11 @@
 That is **~201 added lines** in the core program, including two paths that move real SOL. Anyone relying on this report should know it does **not** describe the program that is being shipped.
 
 **What has been done on that delta instead (weaker assurance — do not read as an audit):**
-- An adversarial review pass (2026-07-18) checked the highest-risk hypotheses: whether `buy_from_vault`'s `treasury`/`founder` destinations could be attacker-substituted for a free vault drain (they are constrained — the M1 bug class is blocked), split exactness, the free-mint signer gate and cap, round-counter overflow, and `MintState` sizing. No exploitable defect was found.
+- **Round 5 (2026-07-18)** — a focused adversarial pass over the delta. It found **one Medium** (`F1`: founder self-dealing via `buy_from_vault`, unbounded by any vault floor) and **one Low** (`F2`: no price gate on `buy_from_vault`). See "Round 5" below. An earlier, shallower pass the same day reported "no exploitable defect" — that was **wrong**, and is corrected here: it only looked for missing constraints, and F1 is an economic/design flaw with every constraint correctly in place.
 - The `arm_floor` peg-boundary math has Rust unit tests running in CI (`pyth_math_tests::arm_gate_*`).
-- ⚠️ The mocha integration suite has **never passed** — it had never been executed at all until 2026-07-18, and is still being brought up. So none of the delta has passing end-to-end coverage.
+- The mocha integration suite now **passes 26/26** and is a required CI check (it had never been executed at all before 2026-07-18). ⚠️ But note those tests largely **predate** this delta — they cover the core mint mechanics, not the founder-revenue split. Green CI is not audit coverage of the new code.
 
-**Recommendation before mainnet:** re-audit the delta — at minimum a focused adversarial pass on `buy_from_vault`'s split and the `is_team_free` branch. Note that Round 1 of this very audit *rejected* the M1 `seed_pool` finding as a non-issue, and Round 4 found it was real. Self-audit passes on this codebase have already missed a genuine bug once.
+**Recommendation before mainnet:** get a **focused paid review of this delta**. Two independent reasons, both from this codebase's own history: Round 1 *rejected* the M1 `seed_pool` finding as a non-issue and Round 4 found it was real; and on 2026-07-18 a shallow pass cleared `buy_from_vault` before a deeper pass the same day found **F1** (Medium). Self-administered passes here have now missed a genuine issue **twice**.
 
 ## Status summary
 
@@ -175,3 +175,90 @@ A fresh independent audit (Claude Fable 5, whole-program read + adversarial veri
 *Fix:* `seed_pool` and its `SeedPool` account struct were **removed** entirely. It was legacy and unused by the fair-launch flow (the community creates the pool externally; ongoing liquidity uses `flush_lp_to_raydium`), so removal eliminates the primitive with no functional loss. The vestigial `pool_seeded` field is retained (never read) to keep the on-chain account layout stable for already-migrated devnet state.
 
 **Verification:** `anchor build` passes clean after both changes. `arm-floor.js`, the launch runbook (Step 11), SECURITY.md, README.md, and the test suite were updated; the two `seed_pool` tests were removed.
+
+---
+
+## Round 5: post-delta adversarial pass (2026-07-18)
+
+Scope: the ~201 lines added after `caf19de` (founder revenue split, referral, team
+allocation, cap 16→8, `arm_floor` math extraction). See "Scope boundary" at the top.
+
+| # | Severity | Finding | Status |
+|---|----------|---------|--------|
+| F1 | **Medium** | `buy_from_vault` lets the **founder buy vault TOBE at a 50% discount**, unbounded by any vault floor | ⚠️ Open |
+| F2 | Low | `buy_from_vault` has **no price gate** despite being documented as an above-$1 ceiling | ⚠️ Open |
+
+### F1 — Founder self-dealing via `buy_from_vault` (Medium)
+
+Two facts combine:
+
+1. **Nothing prevents `buyer == founder`.** `BuyFromVault.founder` is constrained only
+   to equal `mint_state.founder`; no constraint requires it to differ from `buyer`.
+2. **The 30% vault floor does not apply here.** `VaultFloorBreach` is enforced only in
+   `flush_lp_to_raydium`. `buy_from_vault` is bounded solely by
+   `tobe_out <= mint_state.vault_balance` — i.e. drainable to zero.
+
+When the founder is the buyer, `founder_cut` is a transfer to themselves, so their net
+cost is only `dao_cut`:
+
+| | Normal buyer | Founder as buyer |
+|---|---|---|
+| Pays | X SOL | X SOL, of which X/2 returns to self |
+| **Net cost** | **X** | **X/2** |
+| Receives | TOBE worth X at $1 | TOBE worth X at $1 |
+| **Break-even market price** | **$1.00** | **$0.50** |
+
+**Impact.** The founder can acquire protocol-owned vault TOBE at a 50% discount, at any
+time, up to the entire vault balance (50% of all TOBE ever minted). Because their
+break-even is $0.50, it is profitable for them to drain vault TOBE while the market sits
+between $0.50 and $1.00 — precisely the range where the protocol sells its own reserve
+below peg. That reserve is what backs the $1 ceiling, so the mechanism the peg story
+rests on can be depleted by the party who profits from depleting it.
+
+**This is not a missing-constraint bug** — every account constraint is correct. It is an
+economic/design consequence of paying a 50% fee to a party who may also be the
+counterparty. Note that a shallower pass earlier the same day cleared this code precisely
+because it was looking for constraint gaps.
+
+**Disclosure gap.** Public copy frames the founder cut as a fee on *other people's*
+arbitrage ("when someone buys vault TOBE at $1, the incoming SOL is split 50/50"). The
+founder's ability to *be* that someone, at half price, is not stated anywhere.
+
+**Recommended fixes** (in order of robustness):
+1. **Apply the existing 30% vault floor to `buy_from_vault`.** Smallest change, bounds
+   total extraction by *anyone*, and reuses a mechanism already in the codebase.
+2. Route the founder cut to a timelocked or DAO-controlled account so it cannot be
+   recycled into the same transaction's economics.
+3. Disclose the self-purchase capability plainly if it is retained.
+
+⚠️ A naive `require!(buyer.key() != founder.key())` is **not** an adequate fix on its own —
+it is trivially bypassed with a second wallet. Prefer (1).
+
+### F2 — No price gate on `buy_from_vault` (Low)
+
+The docs, site and announcement all describe this as an above-$1 mechanism ("Above $1,
+anyone can buy TOBE from the protocol vault at exactly $1"). The code never checks the
+market price: it computes `tobe_out` from `sol_in` at $1 and checks only vault balance.
+
+For a normal buyer this is self-limiting (buying at $1 below peg loses money), so the
+direct risk is low. It matters because it is the enabling condition for F1's below-peg
+profit window. Fixing F2 alone does **not** fix F1 — at exactly $1 the founder still pays
+an effective $0.50.
+
+### Checked and clean this round
+
+`sell_to_vault` (no founder cut, no symmetric issue) · team free-mint path (signer-gated
+via `minter: Signer`, `checked_add`, hard cap, tokens can't be redirected —
+`minter_tobe.owner == minter.key()`) · referral (instruction data only, no amount effect,
+self-referral rejected) · split arithmetic (exact; odd lamport to the DAO) · destination
+substitution, i.e. the M1 class (blocked — `treasury`/`founder` both constrained and typed
+`SystemAccount`) · `MintState` sizing (`InitSpace`, append-only fields) · `update_founder`
+(authority-gated, rejects the zero pubkey) · round-counter overflow (guarded by
+`current_round < MAX_ROUNDS`) · reentrancy (no callback surface in the SPL token CPIs).
+
+### Standing recommendation
+
+This round was again AI-assisted and self-administered. It found a Medium that an earlier
+pass in the same session missed, which is itself evidence about the method's variance. A
+**focused paid review of this delta** remains recommended — F1 is exactly the class of
+issue (economic, not syntactic) where an independent professional reviewer earns their fee.
