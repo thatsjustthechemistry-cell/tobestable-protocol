@@ -57,7 +57,7 @@ Copy/paste each section into the CoinGecko form. **Replace every `[FILL: ...]` w
 
 **Short description (160 chars max):**
 ```
-Anti-inflationary Solana token with two-way $1 peg via Pyth oracle and permanently-burned Raydium liquidity.
+Anti-inflationary Solana token with an on-chain $1 reference — hard ceiling above, reserve-bounded floor below — and permanently-burned Raydium liquidity.
 ```
 
 **Long description:** *(use this verbatim)*
@@ -86,7 +86,7 @@ How it works:
 
 • Team allocation: 8 free mint rounds, hard-capped in the contract and disclosed (≈ 0.8% of rounds). No other insiders; beyond the cap the founder mints under the same rules as everyone else.
 
-Built on Anchor framework. Smart contract source open on GitHub. Authority controlled by Squads multisig.
+Built on Anchor framework. Smart contract source open on GitHub. Authority controlled by a 2-of-3 Realms (SPL Governance) council multisig at Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC.
 ```
 
 ### Section 4: Supply Information
@@ -110,7 +110,7 @@ buy_from_vault arbitrage at exactly $1, so vault holdings are NOT considered
 circulating until released into the market.
 
 Both values are queryable on-chain at:
-  Program: [FILL: MAINNET_PROGRAM_ID]
+  Program: Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX
   PDA: [FILL: derived from "mint_state" seeds]
 ```
 
@@ -122,9 +122,9 @@ Both values are queryable on-chain at:
 | Whitepaper / documentation | `https://github.com/thatsjustthechemistry-cell/tobestable-protocol/blob/main/SECURITY.md` |
 | Source code (GitHub) | `https://github.com/thatsjustthechemistry-cell/tobestable-protocol` |
 | Block explorer | `https://explorer.solana.com/address/[FILL_MINT]` |
-| Twitter | `[FILL: https://twitter.com/YOUR_HANDLE]` |
-| Telegram | `[FILL: https://t.me/YOUR_CHANNEL — leave blank if none]` |
-| Discord | `[FILL: https://discord.gg/YOUR_INVITE — leave blank if none]` |
+| Twitter | `https://x.com/tobe_stable` |
+| Telegram | `https://t.me/+cqCtGkXO7gA0Yjc0` |
+| Discord | `(none — no Discord)` |
 | Reddit | `[FILL: leave blank if none]` |
 | Facebook | `(leave blank — not relevant)` |
 | LinkedIn | `(leave blank — not relevant)` |
@@ -153,19 +153,36 @@ Both values are queryable on-chain at:
 
 ### Section 8: Tags / Categories
 
+> **Do NOT tag this as a stablecoin.** The name is *TO BE stable*, not *stable already* —
+> it describes a direction of travel, not a claim of being pegged. Every other piece of
+> public copy is careful about this ("TOBE isn't a fiat-backed stablecoin and it isn't a
+> 'guaranteed $1' coin"), and the tags must not contradict it.
+>
+> Two separate reasons:
+> 1. **It's inaccurate.** The ceiling is strong but the floor is explicitly *bounded* by a
+>    finite SOL reserve and stays off until TOBE first reaches $1. That is not a peg.
+> 2. **It's strategically the worst available tag.** Post-Terra/UST, "algorithmic
+>    stablecoin" draws the harshest regulatory and exchange scrutiny in crypto. Listing
+>    reviewers treat it as a red flag by default. Volunteering for that category — for an
+>    asset that isn't even in it — invites rejection and attention for nothing.
+
 | Tag | Should we apply? |
 |---|---|
 | Decentralized Finance (DeFi) | ✅ Yes |
-| Stablecoin | ✅ Yes (algorithmic stablecoin via two-way peg) |
 | Solana Ecosystem | ✅ Yes |
-| Algorithmic Stablecoin | ✅ Yes |
-| Asset-backed Stablecoin | ❌ No (the floor is backed by SOL reserve, not fiat or crypto collateral) |
+| Stablecoin | ❌ **No** — see the note above; TOBE is anti-inflationary with a bounded partial floor, not a pegged asset |
+| Algorithmic Stablecoin | ❌ **No** — inaccurate, and the most scrutinized category post-UST |
+| Asset-backed Stablecoin | ❌ No (the floor is backed by a SOL reserve, not fiat or crypto collateral) |
 | Yield Farming | ❌ No |
 | Governance | ❌ No (no governance token) |
 | Meme | ❌ No |
 | NFT | ❌ No |
 
-**Suggested CoinGecko categories:** `Stablecoins`, `Algorithmic Stablecoin`, `Solana Ecosystem`
+**Suggested CoinGecko categories:** `Solana Ecosystem`, `Decentralized Finance (DeFi)`
+
+If a reviewer asks how to categorise it, the honest one-liner is: *an anti-inflationary
+fixed-supply token with an on-chain $1 reference — a hard ceiling above $1 and a
+reserve-bounded partial floor below.*
 
 ### Section 9: Team Information
 
@@ -223,9 +240,9 @@ CoinGecko reviewers may email asking:
 | Their question | Your answer |
 |---|---|
 | "Where is the founder allocation?" | "Zero. Founder mints under the same 1024-round mechanism as anyone else. Verifiable on-chain — see SECURITY.md `mint_tobe` instruction." |
-| "Why do you call this a stablecoin if the price isn't $1 at launch?" | "TOBESTABLE is an algorithmic stablecoin that uses an anti-inflationary curve to converge toward $1, then defends the peg via two-way arbitrage backed by an on-chain SOL reserve. The mechanism is fully on-chain and permissionless. We disclose openly that the price ramps to $1 over the 1024-round mint, not at TGE." |
+| "Is this a stablecoin?" | "No, and we don't tag it as one. The name is 'TO BE stable', not 'stable already' — it describes a direction, not a claim. TOBE is a fixed-supply anti-inflationary token with an on-chain $1 reference: above $1 the vault sells TOBE at $1, which is a hard ceiling; below $1 it buys from a finite SOL reserve, which is a real but **bounded** partial floor that only activates once TOBE first reaches $1. A bounded floor is not a peg, so calling it a stablecoin would overstate it. Price is not $1 at launch and we say so everywhere." |
 | "What backs the peg?" | "Two layers: (1) algorithmic — anti-inflationary supply curve makes scarcity drive convergence; (2) reserve — vault SOL reserve (up to 5,120 SOL) backs the floor via `sell_to_vault`. Both verifiable on-chain." |
-| "Who controls the authority?" | "After mainnet migration: a Squads multisig at `[FILL: SQUADS_VAULT]`, threshold [FILL: M]-of-[FILL: N]. Verifiable via `verify-multisig.js` script in the repo." |
+| "Who controls the authority?" | "A 2-of-3 Realms (SPL Governance) council multisig — vault `Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC`, DAO https://v2.realms.today/dao/9VUbq5QHSPezGPseqY1kgrwSVLGtndk3XT1y3dfMB5o, council mint `2ZdbLGkKi1Zvk5dKLqcY5UBcDdJVss8u2tGmMnN3gRHN` (supply 3). Verifiable via `verify-multisig.js` in the repo. Disclosed: all three council keys are currently founder-held on separate devices — a bootstrap multisig, not yet multi-party governance." |
 
 ## Submission checklist (go/no-go)
 

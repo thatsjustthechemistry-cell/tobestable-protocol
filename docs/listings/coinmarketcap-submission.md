@@ -70,7 +70,7 @@ The vault enforces a two-way $1 USD peg via on-chain Pyth oracle:
 
 Liquidity is permanently locked: anyone can call flush_lp_to_raydium to deposit accumulated SOL + matching TOBE into the Raydium pool. The LP tokens received are burned in the same atomic transaction. Liquidity cannot be removed by anyone, ever.
 
-Team allocation: 8 free mint rounds, hard-capped in the contract and disclosed (≈ 0.8% of rounds). No other insiders; beyond the cap the founder mints under the same rules as everyone else. Smart contracts open-sourced on GitHub. Authority controlled by Squads multisig.
+Team allocation: 8 free mint rounds, hard-capped in the contract and disclosed (≈ 0.8% of rounds). No other insiders; beyond the cap the founder mints under the same rules as everyone else. Smart contracts open-sourced on GitHub. Authority controlled by a 2-of-3 Realms (SPL Governance) council multisig at Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC.
 ```
 
 ### Section 3: Token Contract Information
@@ -94,7 +94,7 @@ permissionless buy_from_vault instruction at exactly $1 USD. Until
 released into the market, vault tokens are not considered circulating.
 
 Both total_minted and vault_balance are queryable on-chain:
-- Program: [FILL: MAINNET_PROGRAM_ID]
+- Program: Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX
 - State PDA: derived from "mint_state" seeds
 ```
 
@@ -108,9 +108,9 @@ Both total_minted and vault_balance are queryable on-chain:
 | Block explorer | `https://explorer.solana.com/address/[FILL_MINT]` |
 | Block explorer #2 | `https://solscan.io/token/[FILL_MINT]` |
 | Block explorer #3 | `https://solana.fm/address/[FILL_MINT]` |
-| Twitter | `[FILL: https://twitter.com/YOUR_HANDLE]` |
-| Telegram | `[FILL: leave blank if none]` |
-| Discord | `[FILL: leave blank if none]` |
+| Twitter | `https://x.com/tobe_stable` |
+| Telegram | `https://t.me/+cqCtGkXO7gA0Yjc0` |
+| Discord | `(none — no Discord)` |
 | Reddit | `[FILL: leave blank if none]` |
 | Medium | `[FILL: leave blank if none]` |
 | YouTube | `[FILL: leave blank if none]` |
@@ -132,14 +132,20 @@ Both total_minted and vault_balance are queryable on-chain:
 
 CMC's tag taxonomy (as of 2026):
 
+> **Do NOT tag this as a stablecoin.** The name is *TO BE stable*, not *stable already*.
+> It is inaccurate (the floor is bounded by a finite SOL reserve and stays off until TOBE
+> first reaches $1 — that is not a peg), and post-Terra/UST it is the most heavily
+> scrutinised category on both CMC and CoinGecko. See the fuller note in
+> `coingecko-submission.md` § Tags.
+
 | Tag | Apply? |
 |---|---|
-| `algorithmic-stablecoin` | ✅ Yes |
 | `solana-ecosystem` | ✅ Yes |
-| `decentralized-exchange` | ❌ No (we're a token, not a DEX) |
 | `defi` | ✅ Yes |
-| `stablecoin` | ✅ Yes |
-| `asset-backed-stablecoin` | ❌ No (peg is algorithmic, not asset-backed) |
+| `algorithmic-stablecoin` | ❌ **No** — inaccurate, and the most scrutinised tag post-UST |
+| `stablecoin` | ❌ **No** — TOBE is anti-inflationary with a bounded partial floor, not a pegged asset |
+| `asset-backed-stablecoin` | ❌ No (the floor is backed by a SOL reserve, not fiat or crypto collateral) |
+| `decentralized-exchange` | ❌ No (we're a token, not a DEX) |
 | `liquidity-mining` | ❌ No |
 | `governance` | ❌ No |
 | `meme` | ❌ No |
@@ -210,9 +216,9 @@ CMC reviewers may email asking:
 
 | Question | Answer |
 |---|---|
-| "What problem does this solve?" | "Algorithmic stablecoins typically depeg under stress (Terra/UST). TOBESTABLE uses a SOL-reserve-backed two-way peg defended by permissionless arbitrage — no death spiral mechanism, no LUNA-style hyperinflation. The peg is bounded by an honest reserve." |
+| "What problem does this solve?" | "Algorithmic stablecoins typically depeg under stress (Terra/UST) because the floor is defended by minting more of the asset — a death spiral. TOBESTABLE deliberately isn't one: supply is fixed at 1,024 rounds and can never expand, so there is no such mechanism. Its $1 reference is defended by permissionless arbitrage against a finite on-chain SOL reserve, and we state plainly that this makes the floor **bounded and partial** rather than a guarantee. We'd rather describe the limit than imply a peg we can't hold." |
 | "Is the team anonymous?" | "[Honestly disclose — pseudonymous is OK as long as documented.]" |
-| "Why should we list this?" | "Solana-native algorithmic stablecoin with a novel two-way peg + permanently locked liquidity. Source code public, security model documented, multisig-controlled. Price discoverable via Raydium pool with >$X liquidity." |
+| "Why should we list this?" | "Solana-native anti-inflationary token with a fixed 1,024-round supply curve and an on-chain $1 reference — a hard ceiling above $1, a reserve-bounded partial floor below — plus permanently burned Raydium liquidity. Not a stablecoin and not tagged as one. Source code public, security model documented, authority under a 2-of-3 Realms multisig. Price discoverable via the Raydium pool." |
 | "Why is your circulating supply lower than total supply?" | "The vault holds ~50% of all minted TOBE in a PDA. These tokens are only released via the permissionless buy_from_vault arbitrage at exactly $1. Until released, they are not in circulation. Both numbers verifiable on-chain." |
 
 ## Submission checklist (go/no-go)

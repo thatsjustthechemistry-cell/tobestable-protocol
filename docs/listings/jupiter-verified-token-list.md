@@ -59,17 +59,21 @@ description: |
   no other insiders; no SOL to the team from mints.
 
 # ─── Tags (Jupiter uses these for category filters) ───
+# NOTE: deliberately NOT tagged "stablecoin". The name is "TO BE stable", not
+# "stable already" — the floor is bounded by a finite SOL reserve and stays off
+# until TOBE first reaches $1, so it is not a pegged asset. It is also the most
+# scrutinised category post-UST. See coingecko-submission.md § Tags.
 tags:
   - community           # community-launched
-  - stablecoin          # peg-anchored
+  - defi
   - solana-anchored     # built on Anchor framework
 
 # ─── Verification claims ───
 extensions:
   website: https://tobestable.com
-  twitter: [FILL: https://twitter.com/YOUR_HANDLE]
-  discord: [FILL: https://discord.gg/YOUR_INVITE | leave blank if none]
-  telegram: [FILL: https://t.me/YOUR_CHANNEL | leave blank if none]
+  twitter: https://x.com/tobe_stable
+  discord: (none — no Discord)
+  telegram: https://t.me/+cqCtGkXO7gA0Yjc0
   github: https://github.com/thatsjustthechemistry-cell/tobestable-protocol
   coingeckoId: [FILL: AFTER_COINGECKO_LISTING]      # leave blank for first submission
   coinmarketcapId: [FILL: AFTER_CMC_LISTING]        # leave blank for first submission
@@ -99,7 +103,7 @@ Adding the TOBESTABLE token to the verified list.
 ### What is it
 Anti-inflationary Solana token with a two-way $1 USD peg defended via Pyth oracle and a permanently-locked Raydium liquidity pool.
 
-- **Program ID:** `[FILL: MAINNET_PROGRAM_ID]`
+- **Program ID:** `Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX`
 - **Source code:** https://github.com/thatsjustthechemistry-cell/tobestable-protocol (public, MIT-licensed)
 - **Security model:** https://github.com/thatsjustthechemistry-cell/tobestable-protocol/blob/main/SECURITY.md
 
@@ -107,7 +111,7 @@ Anti-inflationary Solana token with a two-way $1 USD peg defended via Pyth oracl
 - [ ] Program source matches deployed bytecode (verifiable via `solana program show` + bytecode diff)
 - [ ] Liquidity pool: `[FILL: MAINNET_POOL_ADDRESS]` on Raydium CPMM
 - [ ] LP tokens permanently burned via `flush_lp_to_raydium` instruction (verifiable on-chain)
-- [ ] Authority: `[FILL: SQUADS_MULTISIG_VAULT_PUBKEY]` (Squads V4 multisig, [N]-of-[M] threshold)
+- [ ] Authority: `Cb7TsQFqMbbshjFEXmxEhCBj1Ab5K3T94M4NLiusqVAC` (Realms / SPL Governance, 2-of-3 council)
 - [ ] Token metadata: https://tobestable.com/token-metadata.json (Metaplex-compliant)
 - [ ] Logo: https://tobestable.com/logo.png (256x256 PNG)
 
