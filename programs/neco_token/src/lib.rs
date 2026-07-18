@@ -120,6 +120,31 @@ fn tobe_at_or_above_one_usd(
     Ok(tobe_at_one_usd >= pool_tobe)
 }
 
+/// 30% of the vault-TOBE baseline captured at `set_pool_config`. Vault TOBE
+/// backs the $1 ceiling, so neither `flush_lp_to_raydium` nor `buy_from_vault`
+/// may take it below this line.
+const VAULT_FLOOR_BPS: u128 = 3000; // 30%
+
+/// Pure vault-floor gate: would removing `tobe_out` leave at least
+/// `VAULT_FLOOR_BPS` of `vault_tobe_at_config` in the vault? Shared by
+/// `flush_lp_to_raydium` and `buy_from_vault` so the two cannot drift — a
+/// second copy of a security-critical bound is how they diverge.
+/// Errors (rather than returning false) if the withdrawal underflows the vault.
+fn vault_withdrawal_within_floor(
+    vault_balance: u64,
+    vault_tobe_at_config: u64,
+    tobe_out: u64,
+) -> Result<bool> {
+    let floor: u64 = ((vault_tobe_at_config as u128)
+        .checked_mul(VAULT_FLOOR_BPS)
+        .and_then(|v| v.checked_div(10_000))
+        .ok_or(TobeError::MathOverflow)?) as u64;
+    let projected = vault_balance
+        .checked_sub(tobe_out)
+        .ok_or(TobeError::VaultFloorBreach)?;
+    Ok(projected >= floor)
+}
+
 #[program]
 pub mod neco_token {
     use super::*;
@@ -366,10 +391,78 @@ pub mod neco_token {
         let tobe_out = lamports_to_tobe_at_one_usd(sol_in_lamports, price, exponent)?;
         require!(tobe_out > 0, TobeError::ZeroAmount);
 
+        // ─── F2 fix (Round 5): enforce the documented ceiling condition ───
+        //
+        // The site, FAQ and announcement all describe this path as active only
+        // "when TOBE trades at or above $1" — but the code never checked, so the
+        // vault would also sell its reserve BELOW peg. That is pure value
+        // destruction for the protocol (it hands over an asset worth less than
+        // $1 and books $1), and it is *profitable* for the founder, who receives
+        // 50% of the proceeds back and so breaks even at $0.50.
+        //
+        // Above $1 nothing changes: selling vault TOBE at $1 IS the ceiling doing
+        // its job. This only blocks the below-peg case. Price is derived exactly
+        // as arm_floor does (pool reserves x Pyth SOL/USD, same audited helper);
+        // the vaults are constrained to the recorded pool config, so the read
+        // cannot be spoofed with unrelated token accounts.
+        //
+        // Reads pool state BEFORE the &mut borrow of mint_state below.
+        {
+            let ms = &ctx.accounts.mint_state;
+            let (pool_tobe, pool_sol) = if ms.tobe_is_token_0 {
+                (
+                    ctx.accounts.raydium_token_0_vault.amount,
+                    ctx.accounts.raydium_token_1_vault.amount,
+                )
+            } else {
+                (
+                    ctx.accounts.raydium_token_1_vault.amount,
+                    ctx.accounts.raydium_token_0_vault.amount,
+                )
+            };
+            require!(pool_tobe > 0 && pool_sol > 0, TobeError::EmptyPoolReserves);
+            require!(
+                tobe_at_or_above_one_usd(pool_tobe, pool_sol, price, exponent)?,
+                TobeError::PriceBelowPeg
+            );
+        }
+
         let mint_state = &mut ctx.accounts.mint_state;
         require!(
             tobe_out <= mint_state.vault_balance,
             TobeError::InsufficientVault
+        );
+
+        // ─── F1 fix (Round 5): bound vault extraction on this path too ───
+        //
+        // buy_from_vault used to be limited only by `tobe_out <= vault_balance`,
+        // i.e. the vault was drainable to ZERO here, while flush_lp_to_raydium
+        // has always been floored at 30% of the baseline. That asymmetry matters
+        // because the founder receives 50% of the proceeds: when the founder is
+        // the buyer, founder_cut returns to them, so their net cost is half and
+        // their break-even drops from $1.00 to $0.50 — making it profitable to
+        // drain the ceiling reserve while TOBE trades BELOW peg. The reserve is
+        // exactly what backs the $1 ceiling.
+        //
+        // Applying the same floor caps that for ANY caller, which is the point:
+        // a `buyer != founder` check alone would be bypassed with a second wallet.
+        //
+        // Requiring pool config closes the companion gap — vault_tobe_at_config
+        // (the floor baseline) is 0 until set_pool_config runs, so the floor
+        // would be 0 in that window. Nothing legitimate needs this instruction
+        // before then: buy_from_vault is the ceiling-arbitrage path, and with no
+        // pool there is no market to arbitrage against.
+        require!(
+            mint_state.raydium_pool_state != Pubkey::default(),
+            TobeError::PoolNotConfigured
+        );
+        require!(
+            vault_withdrawal_within_floor(
+                mint_state.vault_balance,
+                mint_state.vault_tobe_at_config,
+                tobe_out
+            )?,
+            TobeError::VaultFloorBreach
         );
 
         // 1. Split proceeds 50/50: DAO treasury + founder. Integer split gives
@@ -617,7 +710,6 @@ pub mod neco_token {
 
     pub fn flush_lp_to_raydium(ctx: Context<FlushLpToRaydium>, max_tobe_to_pair: u64) -> Result<()> {
         const FLUSH_MIN_LAMPORTS: u64 = 1_000_000_000; // 1 SOL
-        const VAULT_FLOOR_BPS: u128 = 3000; // 30%
 
         let mint_state = &mut ctx.accounts.mint_state;
 
@@ -668,16 +760,15 @@ pub mod neco_token {
         // we revert rather than deposit at a manipulated ratio.
         require!(tobe_to_pair <= max_tobe_to_pair, TobeError::SlippageExceeded);
 
-        // Floor protection
-        let floor: u64 = ((mint_state.vault_tobe_at_config as u128)
-            .checked_mul(VAULT_FLOOR_BPS)
-            .and_then(|v| v.checked_div(10_000))
-            .ok_or(TobeError::MathOverflow)?) as u64;
-        let projected_vault = mint_state
-            .vault_balance
-            .checked_sub(tobe_to_pair)
-            .ok_or(TobeError::VaultFloorBreach)?;
-        require!(projected_vault >= floor, TobeError::VaultFloorBreach);
+        // Floor protection (shared with buy_from_vault — see vault_withdrawal_within_floor)
+        require!(
+            vault_withdrawal_within_floor(
+                mint_state.vault_balance,
+                mint_state.vault_tobe_at_config,
+                tobe_to_pair
+            )?,
+            TobeError::VaultFloorBreach
+        );
 
         // Target LP tokens: sol_to_deposit / pool_sol * lp_supply
         let pool_lp_supply = ctx.accounts.raydium_pool_state.load()?.lp_supply;
@@ -1202,6 +1293,15 @@ pub struct BuyFromVault<'info> {
     )]
     pub founder: SystemAccount<'info>,
 
+    /// Pool vaults, for the F2 price gate (TOBE must be >= $1 to buy from the
+    /// vault). Validated against the recorded pool config exactly as ArmFloor
+    /// does, so the price read cannot be spoofed with unrelated token accounts.
+    #[account(constraint = raydium_token_0_vault.key() == mint_state.raydium_token_0_vault @ TobeError::PoolMismatch)]
+    pub raydium_token_0_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(constraint = raydium_token_1_vault.key() == mint_state.raydium_token_1_vault @ TobeError::PoolMismatch)]
+    pub raydium_token_1_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
     #[account(
         mut,
         constraint = buyer_tobe.mint == mint_state.tobe_mint,
@@ -1667,6 +1767,7 @@ pub enum TobeError {
 mod pyth_math_tests {
     use super::{
         lamports_to_tobe_at_one_usd, tobe_at_or_above_one_usd, tobe_to_lamports_at_one_usd,
+        vault_withdrawal_within_floor,
     };
 
     #[test]
@@ -1733,5 +1834,37 @@ mod pyth_math_tests {
     fn arm_gate_rejects_bad_price() {
         // A non-positive SOL price must surface an error, never silently arm the floor.
         assert!(tobe_at_or_above_one_usd(1, 1_000_000_000, -1, -8).is_err());
+    }
+
+    // ── vault floor (F1 fix) ──
+    // Baseline 1000 => floor is 300 (30%). Guards flush_lp_to_raydium AND
+    // buy_from_vault, so no caller can drain the ceiling reserve past it.
+
+    #[test]
+    fn vault_floor_allows_withdrawal_down_to_the_line() {
+        // 1000 - 700 = 300 == floor. Inclusive, matching the `>=` in both callers.
+        assert!(vault_withdrawal_within_floor(1000, 1000, 700).unwrap());
+    }
+
+    #[test]
+    fn vault_floor_blocks_crossing_the_line() {
+        // 1000 - 701 = 299 < 300 → must be refused.
+        assert!(!vault_withdrawal_within_floor(1000, 1000, 701).unwrap());
+        // The F1 case: draining the vault outright.
+        assert!(!vault_withdrawal_within_floor(1000, 1000, 1000).unwrap());
+    }
+
+    #[test]
+    fn vault_floor_errors_on_underflow() {
+        // Taking more than the vault holds must error, not wrap to a huge number.
+        assert!(vault_withdrawal_within_floor(1000, 1000, 1001).is_err());
+    }
+
+    #[test]
+    fn vault_floor_is_zero_before_pool_config() {
+        // vault_tobe_at_config is 0 until set_pool_config runs, so the floor is 0
+        // and this gate alone would permit a full drain. buy_from_vault therefore
+        // ALSO requires the pool to be configured; this test pins the reason why.
+        assert!(vault_withdrawal_within_floor(1000, 0, 1000).unwrap());
     }
 }
