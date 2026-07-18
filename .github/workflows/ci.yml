@@ -158,24 +158,31 @@ jobs:
         # So start the validator ourselves (still cloning Metaplex, which
         # initialize needs for the metadata CPI) and do a real upgradeable
         # deploy with the CI wallet as the upgrade authority.
+        #
+        # A manual `solana program deploy` does NOT work here: cargo-build-sbf
+        # emits a newer SBPF version than the validator's loader enables
+        #   "Detected sbpf_version required by the executable which are not enabled"
+        # Preloading sidesteps that loader gate, so use the validator's own
+        # --upgradeable-program, which preloads AND writes a real ProgramData
+        # account with an upgrade authority we choose.
         run: |
           solana config set --url http://127.0.0.1:8899
+          PROGRAM_ID=$(solana address -k target/deploy/neco_token-keypair.json)
+          WALLET=$(solana address)
+          echo "program: $PROGRAM_ID"
+          echo "wallet : $WALLET  (will be the upgrade authority)"
           solana-test-validator -r --quiet \
             --bind-address 127.0.0.1 \
             --url https://api.mainnet-beta.solana.com \
-            --clone metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s &
+            --clone metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s \
+            --upgradeable-program "$PROGRAM_ID" target/deploy/neco_token.so "$WALLET" &
           for i in $(seq 1 90); do
             solana cluster-version >/dev/null 2>&1 && break || sleep 2
           done
           solana cluster-version
           solana airdrop 100
-          solana program deploy target/deploy/neco_token.so \
-            --program-id target/deploy/neco_token-keypair.json \
-            --upgrade-authority "$HOME/.config/solana/id.json"
-          echo "--- deployed program / upgrade authority ---"
-          solana program show "$(solana address -k target/deploy/neco_token-keypair.json)"
-          echo "--- test wallet (must match the upgrade authority above) ---"
-          solana address
+          echo "--- program + upgrade authority (must equal the wallet above) ---"
+          solana program show "$PROGRAM_ID"
 
       - name: anchor test (against the running validator)
         # --skip-local-validator / --skip-deploy: started + deployed above.
