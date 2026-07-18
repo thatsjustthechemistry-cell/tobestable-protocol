@@ -143,7 +143,14 @@ jobs:
         run: |
           anchor build
           anchor keys sync --provider.cluster localnet
-          echo "--- program id after sync ---"
+          # REQUIRED second build: `keys sync` rewrites declare_id! in the source
+          # but does not touch the already-built .so, which still carries the old
+          # id ("Please rebuild the program to update the generated artifacts").
+          # We preload that .so into the validator below, so if we skip this the
+          # program's baked-in declare_id != the address it is loaded at and every
+          # instruction fails with DeclaredProgramIdMismatch (4100).
+          anchor build
+          echo "--- program id after sync + rebuild ---"
           anchor keys list
           grep -A1 '\[programs.localnet\]' Anchor.toml
 
