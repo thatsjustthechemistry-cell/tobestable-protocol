@@ -34,7 +34,10 @@ wallet = "~/.config/solana/id.json"
 # its ESM path, so ts-mocha's CommonJS ts-node hook never applies and the
 # extensionless `../target/types/neco_token` import fails with ERR_MODULE_NOT_FOUND.
 # tsx handles TS under both ESM and CJS and resolves extensionless imports.
-test = "npx mocha --import tsx -t 1000000 \"tests/**/*.ts\""
+# mocha's own --import resolves the value as a FILE PATH (file:///.../tsx), not a
+# bare package specifier, so `--import tsx` dies with ERR_MODULE_NOT_FOUND. Setting
+# NODE_OPTIONS lets Node itself resolve `tsx` from node_modules correctly.
+test = "NODE_OPTIONS='--import tsx' npx mocha -t 1000000 \"tests/**/*.ts\""
 
 [test]
 startup_wait = 60000
