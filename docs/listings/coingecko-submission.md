@@ -110,7 +110,7 @@ buy_from_vault arbitrage at exactly $1, so vault holdings are NOT considered
 circulating until released into the market.
 
 Both values are queryable on-chain at:
-  Program: [FILL: MAINNET_PROGRAM_ID]
+  Program: Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX
   PDA: [FILL: derived from "mint_state" seeds]
 ```
 
@@ -122,9 +122,9 @@ Both values are queryable on-chain at:
 | Whitepaper / documentation | `https://github.com/thatsjustthechemistry-cell/tobestable-protocol/blob/main/SECURITY.md` |
 | Source code (GitHub) | `https://github.com/thatsjustthechemistry-cell/tobestable-protocol` |
 | Block explorer | `https://explorer.solana.com/address/[FILL_MINT]` |
-| Twitter | `[FILL: https://twitter.com/YOUR_HANDLE]` |
-| Telegram | `[FILL: https://t.me/YOUR_CHANNEL — leave blank if none]` |
-| Discord | `[FILL: https://discord.gg/YOUR_INVITE — leave blank if none]` |
+| Twitter | `https://x.com/tobe_stable` |
+| Telegram | `https://t.me/+cqCtGkXO7gA0Yjc0` |
+| Discord | `(none — no Discord)` |
 | Reddit | `[FILL: leave blank if none]` |
 | Facebook | `(leave blank — not relevant)` |
 | LinkedIn | `(leave blank — not relevant)` |

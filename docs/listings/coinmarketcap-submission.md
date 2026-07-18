@@ -94,7 +94,7 @@ permissionless buy_from_vault instruction at exactly $1 USD. Until
 released into the market, vault tokens are not considered circulating.
 
 Both total_minted and vault_balance are queryable on-chain:
-- Program: [FILL: MAINNET_PROGRAM_ID]
+- Program: Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX
 - State PDA: derived from "mint_state" seeds
 ```
 
@@ -108,9 +108,9 @@ Both total_minted and vault_balance are queryable on-chain:
 | Block explorer | `https://explorer.solana.com/address/[FILL_MINT]` |
 | Block explorer #2 | `https://solscan.io/token/[FILL_MINT]` |
 | Block explorer #3 | `https://solana.fm/address/[FILL_MINT]` |
-| Twitter | `[FILL: https://twitter.com/YOUR_HANDLE]` |
-| Telegram | `[FILL: leave blank if none]` |
-| Discord | `[FILL: leave blank if none]` |
+| Twitter | `https://x.com/tobe_stable` |
+| Telegram | `https://t.me/+cqCtGkXO7gA0Yjc0` |
+| Discord | `(none — no Discord)` |
 | Reddit | `[FILL: leave blank if none]` |
 | Medium | `[FILL: leave blank if none]` |
 | YouTube | `[FILL: leave blank if none]` |

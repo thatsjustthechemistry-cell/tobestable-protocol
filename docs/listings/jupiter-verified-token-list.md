@@ -67,9 +67,9 @@ tags:
 # ─── Verification claims ───
 extensions:
   website: https://tobestable.com
-  twitter: [FILL: https://twitter.com/YOUR_HANDLE]
-  discord: [FILL: https://discord.gg/YOUR_INVITE | leave blank if none]
-  telegram: [FILL: https://t.me/YOUR_CHANNEL | leave blank if none]
+  twitter: https://x.com/tobe_stable
+  discord: (none — no Discord)
+  telegram: https://t.me/+cqCtGkXO7gA0Yjc0
   github: https://github.com/thatsjustthechemistry-cell/tobestable-protocol
   coingeckoId: [FILL: AFTER_COINGECKO_LISTING]      # leave blank for first submission
   coinmarketcapId: [FILL: AFTER_CMC_LISTING]        # leave blank for first submission
@@ -99,7 +99,7 @@ Adding the TOBESTABLE token to the verified list.
 ### What is it
 Anti-inflationary Solana token with a two-way $1 USD peg defended via Pyth oracle and a permanently-locked Raydium liquidity pool.
 
-- **Program ID:** `[FILL: MAINNET_PROGRAM_ID]`
+- **Program ID:** `Eekx6ftd6WZfSpubr9otS1G6wbKdSCWuXt7n1cbQjmdX`
 - **Source code:** https://github.com/thatsjustthechemistry-cell/tobestable-protocol (public, MIT-licensed)
 - **Security model:** https://github.com/thatsjustthechemistry-cell/tobestable-protocol/blob/main/SECURITY.md
 
