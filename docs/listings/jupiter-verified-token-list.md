@@ -59,9 +59,13 @@ description: |
   no other insiders; no SOL to the team from mints.
 
 # ─── Tags (Jupiter uses these for category filters) ───
+# NOTE: deliberately NOT tagged "stablecoin". The name is "TO BE stable", not
+# "stable already" — the floor is bounded by a finite SOL reserve and stays off
+# until TOBE first reaches $1, so it is not a pegged asset. It is also the most
+# scrutinised category post-UST. See coingecko-submission.md § Tags.
 tags:
   - community           # community-launched
-  - stablecoin          # peg-anchored
+  - defi
   - solana-anchored     # built on Anchor framework
 
 # ─── Verification claims ───
