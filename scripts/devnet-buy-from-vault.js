@@ -135,6 +135,10 @@ async function main() {
             vaultTokenAccount: vaultTokenPda,
             treasury: state.treasury,
             founder: state.founder, // 50% founder split
+            // F2 price gate: buy_from_vault now requires TOBE >= $1, derived from
+            // these pool reserves x Pyth (same inputs arm_floor uses).
+            raydiumToken0Vault: state.raydiumToken0Vault,
+            raydiumToken1Vault: state.raydiumToken1Vault,
             buyerTobe: buyerTobeKp.publicKey,
             pythPriceUpdate: priceUpdateAccount,
             tokenProgram: TOKEN_PROGRAM_ID,

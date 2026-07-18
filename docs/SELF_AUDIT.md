@@ -186,7 +186,21 @@ allocation, cap 16→8, `arm_floor` math extraction). See "Scope boundary" at th
 | # | Severity | Finding | Status |
 |---|----------|---------|--------|
 | F1 | **Medium** | `buy_from_vault` lets the **founder buy vault TOBE at a 50% discount**, unbounded by any vault floor | ⚠️ **Mitigated, not eliminated** — see "F1 fix" |
-| F2 | Low | `buy_from_vault` has **no price gate** despite being documented as an above-$1 ceiling | ⚠️ Open |
+| F2 | Low→**Medium** | `buy_from_vault` had **no price gate** despite the site/FAQ/announcement all stating it is active only "when TOBE trades at or above $1" | ✅ Fixed |
+
+**F2 was re-rated on review.** It was initially filed Low as "self-limiting for honest
+buyers." That underweighted the real problem: user-facing copy in three places asserted a
+gate the contract did not implement. Below peg the vault would hand over an asset worth
+less than $1 and book $1 — value destruction — and the founder, getting 50% back, breaks
+even at $0.50 and so *profits* from exactly that. F1 and F2 compounded.
+
+**F2 fix.** `buy_from_vault` now requires TOBE ≥ $1, derived from the pool reserves ×
+Pyth SOL/USD via the same audited `tobe_at_or_above_one_usd` helper `arm_floor` uses. The
+pool vaults are constrained to the recorded pool config, so the read cannot be spoofed
+with unrelated token accounts. Above $1 behaviour is unchanged — selling vault TOBE at $1
+*is* the ceiling working, and the founder still earns the disclosed 50% on it. Requires
+two added accounts on `BuyFromVault` (wire-format change; `devnet-buy-from-vault.js`
+updated).
 
 ### F1 fix — what it does and does NOT do
 
@@ -200,9 +214,18 @@ security-critical bound cannot drift between two copies. Unit-tested in CI
 
 **Residual — read this before treating F1 as closed.** The floor *bounds* the
 extraction; it does not remove the discount. The founder can still buy vault TOBE
-at an effective 50% off, and can still do so for **70% of the vault** before the
-floor stops them. On a full 1,024-round supply that is a large amount of
-protocol-owned TOBE acquirable at half price.
+at an effective 50% off, for up to **70% of the vault** before the floor stops
+them. On a full 1,024-round supply that is a large amount of protocol-owned TOBE
+acquirable at half price.
+
+What the **F2 price gate** additionally removes is the *value-destroying* half of
+this: the founder can no longer do it while TOBE trades below $1, which was the
+range where the protocol handed over an asset worth less than it booked. What
+remains is the founder capturing their disclosed 50% fee while also being the
+counterparty, in the range (≥ $1) where vault selling is the intended ceiling
+behaviour. That is an economic advantage, not value destruction — but it is still
+not what the public copy describes, which frames the cut as a fee on *other
+people's* arbitrage.
 
 Fully closing F1 requires a change to the fee *model*, not another bound — e.g.
 routing `founder_cut` to a timelocked/DAO-controlled account so it cannot be

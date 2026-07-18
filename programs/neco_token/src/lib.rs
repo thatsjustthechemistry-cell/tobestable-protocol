@@ -391,6 +391,42 @@ pub mod neco_token {
         let tobe_out = lamports_to_tobe_at_one_usd(sol_in_lamports, price, exponent)?;
         require!(tobe_out > 0, TobeError::ZeroAmount);
 
+        // ─── F2 fix (Round 5): enforce the documented ceiling condition ───
+        //
+        // The site, FAQ and announcement all describe this path as active only
+        // "when TOBE trades at or above $1" — but the code never checked, so the
+        // vault would also sell its reserve BELOW peg. That is pure value
+        // destruction for the protocol (it hands over an asset worth less than
+        // $1 and books $1), and it is *profitable* for the founder, who receives
+        // 50% of the proceeds back and so breaks even at $0.50.
+        //
+        // Above $1 nothing changes: selling vault TOBE at $1 IS the ceiling doing
+        // its job. This only blocks the below-peg case. Price is derived exactly
+        // as arm_floor does (pool reserves x Pyth SOL/USD, same audited helper);
+        // the vaults are constrained to the recorded pool config, so the read
+        // cannot be spoofed with unrelated token accounts.
+        //
+        // Reads pool state BEFORE the &mut borrow of mint_state below.
+        {
+            let ms = &ctx.accounts.mint_state;
+            let (pool_tobe, pool_sol) = if ms.tobe_is_token_0 {
+                (
+                    ctx.accounts.raydium_token_0_vault.amount,
+                    ctx.accounts.raydium_token_1_vault.amount,
+                )
+            } else {
+                (
+                    ctx.accounts.raydium_token_1_vault.amount,
+                    ctx.accounts.raydium_token_0_vault.amount,
+                )
+            };
+            require!(pool_tobe > 0 && pool_sol > 0, TobeError::EmptyPoolReserves);
+            require!(
+                tobe_at_or_above_one_usd(pool_tobe, pool_sol, price, exponent)?,
+                TobeError::PriceBelowPeg
+            );
+        }
+
         let mint_state = &mut ctx.accounts.mint_state;
         require!(
             tobe_out <= mint_state.vault_balance,
@@ -1256,6 +1292,15 @@ pub struct BuyFromVault<'info> {
         constraint = founder.key() == mint_state.founder @ TobeError::Unauthorized
     )]
     pub founder: SystemAccount<'info>,
+
+    /// Pool vaults, for the F2 price gate (TOBE must be >= $1 to buy from the
+    /// vault). Validated against the recorded pool config exactly as ArmFloor
+    /// does, so the price read cannot be spoofed with unrelated token accounts.
+    #[account(constraint = raydium_token_0_vault.key() == mint_state.raydium_token_0_vault @ TobeError::PoolMismatch)]
+    pub raydium_token_0_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(constraint = raydium_token_1_vault.key() == mint_state.raydium_token_1_vault @ TobeError::PoolMismatch)]
+    pub raydium_token_1_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
     #[account(
         mut,
