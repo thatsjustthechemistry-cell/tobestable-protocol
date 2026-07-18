@@ -24,7 +24,7 @@ Above $1, anyone can buy TOBE from the protocol vault at exactly $1 and sell on 
 Below $1, anyone can buy cheap TOBE and sell it to the vault at $1, drawn from an on-chain SOL reserve (5 SOL accrues per mint round). This floor is real but **bounded by the reserve** — it defends as far as the reserve reaches, not infinitely. It also only activates once TOBE first reaches $1. We say this plainly because pretending otherwise is how UST died.
 
 **5/ Fair launch — the numbers**
-1,024 mint rounds. Every round costs 10 SOL. Round 1 mints 524,288 TOBE; each round mints fewer (anti-inflationary curve), down to 512 in round 1,024. 50% to the minter, 50% to the protocol vault. No presale. Team allocation: 8 disclosed free rounds, hard-capped on-chain. No SOL to the team from mints.
+1,024 mint rounds. Every round costs 10 SOL. Round 1 mints 1,048,576 TOBE — 524,288 to the minter, 524,288 to the protocol vault; each round mints fewer (anti-inflationary curve), down to 1,024 in round 1,024. No presale. Team allocation: 8 disclosed free rounds, hard-capped on-chain. No SOL to the team from mints.
 
 **6/ Permanent liquidity**
 Half of every mint's SOL accumulates and is deposited into a Raydium TOBE/SOL pool — and the LP tokens are **burned**. The liquidity is locked forever; nobody, including me, can pull it.
