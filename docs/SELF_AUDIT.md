@@ -155,7 +155,7 @@ modify audited-correct flush accounting for protocol-owned dust.
 1. Re-run the `cpi-token` reviewer + a focused review of the Raydium CPI account set.
 2. Cross-derive `token_0/1_vault` from `pool_state` in `set_pool_config` (completes #8).
 3. Add integration tests for the now-fixed `sell_to_vault` floor and post-seed `flush`.
-4. Consider a free static pass (Sec3 X-Ray, `cargo-audit`) and community review before launch.
+4. ✅ **`cargo-audit` run 2026-07-19 — 0 vulnerabilities.** Five advisory warnings, all transitive from the Solana/Anchor toolchain and none reaching the deployed program: `bincode` + `libsecp256k1` (unmaintained, no CVE; the program never uses secp256k1), `anyhow` (unsound `downcast_mut()`, host-side tooling only), and `rand` 0.7/0.8 (unsound with a custom logger — BPF has no entropy source, so not on the program path). This checks the dependency tree against the RustSec advisory DB; it says nothing about whether the program *logic* is correct, which is what an audit does. Sec3 X-Ray and community review remain unactioned.
 
 ---
 
