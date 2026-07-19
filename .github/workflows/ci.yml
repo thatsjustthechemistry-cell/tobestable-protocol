@@ -182,6 +182,10 @@ jobs:
             --bind-address 127.0.0.1 \
             --url https://api.mainnet-beta.solana.com \
             --clone-upgradeable-program metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s \
+            --clone-upgradeable-program CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C \
+            --clone D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2 \
+            --clone DNXgeM9EiiaAbaWvwjHj9fQQLAX5ZsfHyvmYUNRAdNC8 \
+            --clone So11111111111111111111111111111111111111112 \
             --upgradeable-program "$PROGRAM_ID" target/deploy/neco_token.so "$WALLET" &
           for i in $(seq 1 90); do
             solana cluster-version >/dev/null 2>&1 && break || sleep 2
