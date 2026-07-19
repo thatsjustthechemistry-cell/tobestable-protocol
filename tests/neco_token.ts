@@ -1226,7 +1226,11 @@ describe("tobestable", () => {
     // The 30%-floor baseline is captured here — the value yesterday's audit
     // showed decays into irrelevance, which is why buy_from_vault now anchors to
     // total_minted/2 instead.
-    assert.ok(state.vaultTobeAtConfig.toNumber() > 0, "floor baseline should be captured");
+    // .gtn(), not .toNumber() — vaultTobeAtConfig is a u64 in raw 9-decimal
+    // units, so by ~20 mint rounds it is ~1.04e16 and exceeds JS's 2^53 safe
+    // integer limit. toNumber() throws "Number can only safely store up to 53
+    // bits" on a value that is perfectly valid on-chain.
+    assert.ok(state.vaultTobeAtConfig.gtn(0), "floor baseline should be captured");
     console.log("  ✓ set_pool_config verified against the real pool");
   });
 
