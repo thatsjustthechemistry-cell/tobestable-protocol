@@ -81,6 +81,16 @@ abuse vector** — the gap between mint cost (~$0.0036/TOBE early) and the $1 fl
 which made `sell_to_vault` a ~275x below-peg drain before TOBE ever legitimately
 reached $1.
 
+> ⚠️ **SUPERSEDED BY ROUND 4 (H1) — read this first.** The section below describes
+> `arm_floor` as it stood after Round 2, when it was **permissionless**. Round 4
+> re-rated exactly that as **High** and the shipped program now makes `arm_floor`
+> **authority-only** (a 2-of-3 council multisig), with the spot-price check retained
+> only as a *secondary* guard. The "Known limitation" paragraph below was likewise
+> an *accepted* risk at Round 2 and is **no longer accepted** — it is the finding.
+> See [Round 4 → H1](#round-4-fable-5-adversarial-audit-2-findings-fixed). This text
+> is kept as a historical record of the reasoning, not as a description of the
+> program being shipped.
+
 **Mechanism.** New one-way state flag `floor_active` (default `false`). `sell_to_vault`
 now requires `floor_active == true`. A new permissionless instruction `arm_floor`
 sets it true the first time TOBE's market price reaches $1, where TOBE/USD is
@@ -91,11 +101,18 @@ audited `lamports_to_tobe_at_one_usd` helper). Once armed it stays armed forever
 early below-peg drain is impossible. After it arms, the floor behaves as the
 (still reserve-bounded) backstop described above.
 
-**Known limitation.** `arm_floor` reads the pool's **spot** reserves, which are
+**Known limitation** *(Round 2's position — **rejected by Round 4**, see H1).*
+`arm_floor` reads the pool's **spot** reserves, which are
 manipulable. Early on this is self-limiting (pushing the pool to $1 costs far more
 than the tiny reserve yields), and the read vaults are constrained to the recorded
 pool config. It is **not** a TWAP — a determined actor could spike the spot price
 to arm the latch once. A future hardening could require a time-averaged price.
+
+> ⚠️ **Round 4 overturned the "self-limiting" argument above.** It is an *unenforced
+> assumption about pool depth*, while `vault_sol_reserve` grows a fixed 5 SOL/round
+> regardless of pool depth — so if flushes lag or the pool is thin, arming can cost
+> less than the reserve it unlocks, and that reserve is real user deposits. The fix
+> was not a TWAP but an authority gate: `arm_floor` is now **authority-only**.
 
 ## Focused CPI / token / mint / reentrancy re-audit (round 2)
 
