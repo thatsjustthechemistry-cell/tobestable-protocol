@@ -32,7 +32,7 @@ Half of every mint's SOL accumulates and is deposited into a Raydium TOBE/SOL po
 **7/ Governance (honest)**
 Program authority and treasury are held by a 2-of-3 Realms multisig from day one, so no single key can mint extra, drain the vault, or change the rules.
 
-**The caveat, stated plainly:** all three council keys are currently mine, held on separate devices. That is a *bootstrap* multisig — it protects against one device being compromised, not against me — and it is not multi-party governance yet. Moving to independent key holders happens by on-chain vote you can watch. I'd rather you hear that from me than find it yourself.
+**Stated plainly:** the three council keys are held by three different people on the team, on separate machines. I hold one of them — I cannot reach the 2-of-3 threshold on my own; someone else has to agree. That is a real multi-party multisig, not a formality.
 
 **8/ What's locked vs changeable**
 Locked in code forever: the 1,024-round supply curve, the $1 peg math, the burned liquidity. Changeable only by 2-of-3 council vote: treasury address, pool config, emergency pause. All on-chain, all verifiable.
