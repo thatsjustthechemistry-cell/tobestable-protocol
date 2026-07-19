@@ -494,9 +494,14 @@ describe("tobestable", () => {
   //
   // The pure TOBE≥$1 arming MATH is unit-tested in CI (no devnet needed): see the
   // `arm_gate_*` cases in the Rust `pyth_math_tests` module (tobe_at_or_above_one_usd).
-  it.skip("rejects arm_floor from non-authority — Unauthorized (devnet)", async () => {
-    // See runbook above; requires devnet pool + Pyth, so it can't run under anchor test.
-  });
+  // ✅ SUPERSEDED (2026-07-19) — this is now a REAL, RUNNING test, not a devnet
+  // runbook. See §28: "arm_floor rejects a non-authority — the H1 gate". CI clones
+  // mainnet Raydium + the Pyth receiver + Wormhole into the validator, creates a
+  // genuine pool, posts a fresh Hermes price, and asserts both the Unauthorized
+  // rejection and that floor_active stays false. The devnet route it described is
+  // in fact impossible now: arm_floor requires a configured pool, and
+  // set_pool_config cannot succeed on devnet (mainnet Raydium id is compiled in).
+  // Kept as a marker so nobody re-adds a manual devnet step that is already covered.
 
   // ── 10. Pause ──
 
