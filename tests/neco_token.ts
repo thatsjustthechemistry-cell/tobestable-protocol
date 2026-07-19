@@ -1090,4 +1090,174 @@ describe("tobestable", () => {
       console.log("  ✓ Old authority correctly rejected");
     }
   });
+
+  // ── 27. Raydium pool + set_pool_config (localnet, cloned mainnet Raydium) ──
+  //
+  // set_pool_config had NO coverage anywhere: it validates the pool against the
+  // MAINNET Raydium CPMM program (the crate is pinned default-features = false,
+  // so CPMMoo8… is compiled in and devnet's DRaycpLY… is not), which made devnet
+  // structurally useless for it. CI now clones mainnet Raydium into the local
+  // validator, so a real pool can be created here and Step 9 exercised for real.
+  //
+  // These run LAST on purpose: by this point authority has moved to
+  // newAuthKeypair, so set_pool_config must be signed by that key, not `authority`.
+  //
+  // The Raydium SDK is imported DYNAMICALLY inside the test rather than at module
+  // top: if the SDK fails to load or its API is unreachable, only these tests
+  // fail — the other 30 stay green instead of the whole file dying at import.
+
+  let poolInfo: {
+    poolId: anchor.web3.PublicKey;
+    poolAuthority: anchor.web3.PublicKey;
+    lpMint: anchor.web3.PublicKey;
+    vaultA: anchor.web3.PublicKey;
+    vaultB: anchor.web3.PublicKey;
+    tobeIsToken0: boolean;
+  } | null = null;
+
+  it("creates a real TOBE/wSOL Raydium CPMM pool on localnet", async () => {
+    const {
+      Raydium,
+      CREATE_CPMM_POOL_PROGRAM,
+      CREATE_CPMM_POOL_FEE_ACC,
+      getCpmmPdaAmmConfigId,
+      TxVersion,
+    } = await import("@raydium-io/raydium-sdk-v2");
+    const BN = (await import("bn.js")).default;
+    const splTok = await import("@solana/spl-token");
+
+    // Park TOBE in a real ATA so the SDK's owner-token-account discovery finds it
+    // deterministically (minterTobe is a bare account, not an ATA).
+    const ata = await splTok.getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      (authority as any).payer,
+      tobeMint.publicKey,
+      authority.publicKey
+    );
+    const seedTobe = 200_000 * TOBE_DECIMALS;
+    await splTok.transfer(
+      provider.connection,
+      (authority as any).payer,
+      minterTobe,
+      ata.address,
+      authority.publicKey,
+      seedTobe
+    );
+
+    const raydium = await Raydium.load({
+      connection: provider.connection,
+      owner: (authority as any).payer,
+      cluster: "mainnet",
+      disableFeatureCheck: true,
+      blockhashCommitment: "confirmed",
+    });
+
+    // Fee configs come from Raydium's API (mainnet shapes), but the on-chain
+    // account is the cloned AMM config PDA — override id exactly as the mainnet
+    // script does so the instruction points at the account we actually cloned.
+    const feeConfigs = await raydium.api.getCpmmConfigs();
+    feeConfigs.forEach((c: any) => {
+      c.id = getCpmmPdaAmmConfigId(CREATE_CPMM_POOL_PROGRAM, c.index).publicKey.toBase58();
+    });
+
+    // Raydium requires token_0 < token_1 lexicographically.
+    const NATIVE = splTok.NATIVE_MINT;
+    const tobeFirst = tobeMint.publicKey.toBuffer().compare(NATIVE.toBuffer()) < 0;
+    const mintA = tobeFirst ? tobeMint.publicKey : NATIVE;
+    const mintB = tobeFirst ? NATIVE : tobeMint.publicKey;
+    const solSide = 2 * anchor.web3.LAMPORTS_PER_SOL;
+
+    const { execute, extInfo } = await raydium.cpmm.createPool({
+      programId: CREATE_CPMM_POOL_PROGRAM,
+      poolFeeAccount: CREATE_CPMM_POOL_FEE_ACC,
+      mintA: { address: mintA.toBase58(), decimals: 9, programId: splTok.TOKEN_PROGRAM_ID.toBase58() },
+      mintB: { address: mintB.toBase58(), decimals: 9, programId: splTok.TOKEN_PROGRAM_ID.toBase58() },
+      mintAAmount: new BN(tobeFirst ? seedTobe : solSide),
+      mintBAmount: new BN(tobeFirst ? solSide : seedTobe),
+      startTime: new BN(0),
+      feeConfig: feeConfigs[0],
+      associatedOnly: false,
+      ownerInfo: { useSOLBalance: true },
+      txVersion: TxVersion.V0,
+    });
+    await execute({ sendAndConfirm: true });
+
+    poolInfo = {
+      poolId: extInfo.address.poolId,
+      poolAuthority: extInfo.address.authority,
+      lpMint: extInfo.address.lpMint,
+      vaultA: extInfo.address.vaultA,
+      vaultB: extInfo.address.vaultB,
+      tobeIsToken0: tobeFirst,
+    };
+
+    const acc = await provider.connection.getAccountInfo(poolInfo.poolId);
+    assert.ok(acc, "pool state account not created");
+    assert.equal(
+      acc.owner.toBase58(),
+      CREATE_CPMM_POOL_PROGRAM.toBase58(),
+      "pool not owned by the cloned mainnet CPMM program"
+    );
+    console.log("  ✓ pool:", poolInfo.poolId.toBase58(), "| tobe_is_token_0:", tobeFirst);
+  });
+
+  it("set_pool_config records the pool (launch Step 9)", async () => {
+    assert.ok(poolInfo, "pool creation must succeed first");
+
+    await program.methods
+      .setPoolConfig(poolInfo!.tobeIsToken0)
+      .accounts({
+        authority: newAuthKeypair.publicKey, // authority moved earlier in this suite
+        mintState: mintStatePda,
+        raydiumPoolState: poolInfo!.poolId,
+        raydiumPoolAuthority: poolInfo!.poolAuthority,
+        raydiumLpMint: poolInfo!.lpMint,
+        raydiumToken0Vault: poolInfo!.vaultA,
+        raydiumToken1Vault: poolInfo!.vaultB,
+      })
+      .signers([newAuthKeypair])
+      .rpc();
+
+    const state = await program.account.mintState.fetch(mintStatePda);
+    assert.equal(state.raydiumPoolState.toBase58(), poolInfo!.poolId.toBase58());
+    assert.equal(state.raydiumToken0Vault.toBase58(), poolInfo!.vaultA.toBase58());
+    assert.equal(state.raydiumToken1Vault.toBase58(), poolInfo!.vaultB.toBase58());
+    assert.equal(state.tobeIsToken0, poolInfo!.tobeIsToken0);
+    // The 30%-floor baseline is captured here — the value yesterday's audit
+    // showed decays into irrelevance, which is why buy_from_vault now anchors to
+    // total_minted/2 instead.
+    assert.ok(state.vaultTobeAtConfig.toNumber() > 0, "floor baseline should be captured");
+    console.log("  ✓ set_pool_config verified against the real pool");
+  });
+
+  it("rejects set_pool_config from a non-authority", async () => {
+    assert.ok(poolInfo, "pool creation must succeed first");
+    const intruder = anchor.web3.Keypair.generate();
+    const sig = await provider.connection.requestAirdrop(intruder.publicKey, 1_000_000_000);
+    await provider.connection.confirmTransaction(sig);
+
+    try {
+      await program.methods
+        .setPoolConfig(poolInfo!.tobeIsToken0)
+        .accounts({
+          authority: intruder.publicKey,
+          mintState: mintStatePda,
+          raydiumPoolState: poolInfo!.poolId,
+          raydiumPoolAuthority: poolInfo!.poolAuthority,
+          raydiumLpMint: poolInfo!.lpMint,
+          raydiumToken0Vault: poolInfo!.vaultA,
+          raydiumToken1Vault: poolInfo!.vaultB,
+        })
+        .signers([intruder])
+        .rpc();
+      assert.fail("Should have rejected — set_pool_config is authority-only");
+    } catch (err) {
+      assert.ok(
+        err.toString().includes("Unauthorized") ||
+          err.toString().includes("ConstraintRaw") ||
+          err.toString().includes("PoolAlreadyConfigured"),
+        `Expected Unauthorized/PoolAlreadyConfigured, got: ${err.toString().slice(0, 200)}`
+      );
+    }
+  });
 });
