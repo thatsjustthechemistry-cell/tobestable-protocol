@@ -126,16 +126,30 @@ fn tobe_at_or_above_one_usd(
 const VAULT_FLOOR_BPS: u128 = 3000; // 30%
 
 /// Pure vault-floor gate: would removing `tobe_out` leave at least
-/// `VAULT_FLOOR_BPS` of `vault_tobe_at_config` in the vault? Shared by
-/// `flush_lp_to_raydium` and `buy_from_vault` so the two cannot drift — a
-/// second copy of a security-critical bound is how they diverge.
+/// `VAULT_FLOOR_BPS` of `floor_baseline` in the vault? Shared by
+/// `flush_lp_to_raydium` and `buy_from_vault` so the arithmetic cannot drift.
 /// Errors (rather than returning false) if the withdrawal underflows the vault.
+///
+/// ⚠️ The BASELINE is the security-critical choice, not the percentage — see the
+/// two call sites, which deliberately pass different ones:
+///
+/// * A baseline snapshotted once (`vault_tobe_at_config`) protects a FIXED
+///   QUANTITY. As the vault keeps growing with every mint, that quantity decays
+///   into a rounding error: config at round 20 leaves ~99% of the round-1024
+///   vault extractable. Fine where the drawdown is bounded by other means.
+/// * A baseline recomputed from the CURRENT balance would be worse still — it is
+///   ratchetable, since each withdrawal lowers the balance and therefore the next
+///   floor (1000 → 300 → 90 → 27 → …), draining to zero by repetition.
+/// * A MONOTONIC baseline (`total_minted / 2` — what the vault would hold had
+///   nothing ever been withdrawn) is the only one that gives a true cumulative
+///   bound: `total_minted` never decreases, so no sequence of withdrawals can
+///   lower the floor.
 fn vault_withdrawal_within_floor(
     vault_balance: u64,
-    vault_tobe_at_config: u64,
+    floor_baseline: u64,
     tobe_out: u64,
 ) -> Result<bool> {
-    let floor: u64 = ((vault_tobe_at_config as u128)
+    let floor: u64 = ((floor_baseline as u128)
         .checked_mul(VAULT_FLOOR_BPS)
         .and_then(|v| v.checked_div(10_000))
         .ok_or(TobeError::MathOverflow)?) as u64;
@@ -456,12 +470,22 @@ pub mod neco_token {
             mint_state.raydium_pool_state != Pubkey::default(),
             TobeError::PoolNotConfigured
         );
+        // Baseline = total_minted / 2, i.e. what the vault would hold if nothing
+        // had ever been withdrawn. This is MONOTONIC (total_minted only grows), so
+        // the floor rises with the vault and cannot be ratcheted down by repeated
+        // withdrawals — which is what makes it a real cumulative bound on
+        // extraction. The earlier `vault_tobe_at_config` snapshot did not do this:
+        // taken at Step 9 it decayed to ~1% of the round-1024 vault, leaving
+        // ~99% extractable rather than the intended 70%.
+        //
+        // Exact by construction: each mint gives the minter total_tokens/2 and the
+        // vault the remainder, and total_tokens is always even (x 1e9 decimals).
+        let never_withdrawn = mint_state
+            .total_minted
+            .checked_div(2)
+            .ok_or(TobeError::MathOverflow)?;
         require!(
-            vault_withdrawal_within_floor(
-                mint_state.vault_balance,
-                mint_state.vault_tobe_at_config,
-                tobe_out
-            )?,
+            vault_withdrawal_within_floor(mint_state.vault_balance, never_withdrawn, tobe_out)?,
             TobeError::VaultFloorBreach
         );
 
@@ -760,7 +784,24 @@ pub mod neco_token {
         // we revert rather than deposit at a manipulated ratio.
         require!(tobe_to_pair <= max_tobe_to_pair, TobeError::SlippageExceeded);
 
-        // Floor protection (shared with buy_from_vault — see vault_withdrawal_within_floor)
+        // Floor protection. NOTE the baseline here is deliberately the
+        // `vault_tobe_at_config` snapshot, NOT the monotonic `total_minted / 2`
+        // that buy_from_vault uses. The two instructions do different things:
+        //
+        //   buy_from_vault  — TOBE leaves the protocol to a buyer. Extraction.
+        //                     Needs a genuine cumulative bound (see there).
+        //   flush           — TOBE becomes Raydium liquidity and the LP receipt is
+        //                     BURNED. Nothing leaves; the vault's TOBE converts into
+        //                     permanently locked liquidity backing this same token.
+        //
+        // Applying the tighter monotonic floor here would throttle LP injection —
+        // the mechanism that builds the market — to protect against a "drain" that
+        // is not a drain. Left as-is deliberately.
+        //
+        // ⚠️ Consequence: flush's floor still decays relative to a growing vault, so
+        // it is a weak constraint late in the mint schedule. That is acceptable only
+        // because flush cannot move TOBE to an arbitrary destination — re-audit this
+        // if flush ever gains a caller-chosen recipient.
         require!(
             vault_withdrawal_within_floor(
                 mint_state.vault_balance,
@@ -1861,10 +1902,57 @@ mod pyth_math_tests {
     }
 
     #[test]
-    fn vault_floor_is_zero_before_pool_config() {
-        // vault_tobe_at_config is 0 until set_pool_config runs, so the floor is 0
-        // and this gate alone would permit a full drain. buy_from_vault therefore
-        // ALSO requires the pool to be configured; this test pins the reason why.
+    fn vault_floor_monotonic_baseline_cannot_be_ratcheted_down() {
+        // The bug this guards against: anchoring the floor to the CURRENT balance
+        // lets repeated withdrawals walk the vault to zero, because each one lowers
+        // the balance and therefore the next floor (1000 -> 300 -> 90 -> 27 -> ...).
+        //
+        // buy_from_vault anchors to total_minted/2, which never decreases. Simulate
+        // a vault drained toward the floor while the baseline stays put: once at the
+        // line, EVERY further withdrawal must be refused.
+        let baseline = 1000u64; // total_minted/2, monotonic
+        let mut vault = 1000u64;
+        // Walk down to the floor (300) in chunks.
+        for _ in 0..10 {
+            if vault_withdrawal_within_floor(vault, baseline, 100).unwrap() {
+                vault -= 100;
+            } else {
+                break;
+            }
+        }
+        assert_eq!(vault, 300, "should stop exactly at 30% of the fixed baseline");
+        // At the floor, nothing more may leave — not even 1 unit.
+        assert!(!vault_withdrawal_within_floor(vault, baseline, 1).unwrap());
+    }
+
+    #[test]
+    fn vault_floor_rises_as_minting_continues() {
+        // The stale-snapshot bug: a baseline captured early decays into
+        // irrelevance. With the monotonic baseline the floor tracks the vault, so
+        // the protected FRACTION stays 30% no matter how large the vault grows.
+        for &minted in &[10_000u64, 1_000_000, 500_000_000] {
+            let baseline = minted / 2; // vault if nothing withdrawn
+            let vault = baseline; // untouched vault
+            let floor = baseline * 30 / 100;
+            // Taking everything above the floor is allowed...
+            assert!(vault_withdrawal_within_floor(vault, baseline, vault - floor).unwrap());
+            // ...but one unit more is not, at every scale.
+            assert!(!vault_withdrawal_within_floor(vault, baseline, vault - floor + 1).unwrap());
+        }
+    }
+
+    #[test]
+    fn vault_floor_is_zero_when_the_baseline_is_zero() {
+        // A zero baseline yields a zero floor, permitting a full drain. This is why
+        // the choice of baseline matters more than the percentage.
+        //
+        // Applies to FLUSH, whose baseline (`vault_tobe_at_config`) is 0 until
+        // set_pool_config runs — flush separately requires the pool to be configured,
+        // so it can never be called in that window.
+        //
+        // buy_from_vault is no longer exposed to this: its baseline is
+        // `total_minted / 2`, which is non-zero the moment anyone has minted. (It
+        // still requires pool config, but for the F2 price gate, not for this.)
         assert!(vault_withdrawal_within_floor(1000, 0, 1000).unwrap());
     }
 }
