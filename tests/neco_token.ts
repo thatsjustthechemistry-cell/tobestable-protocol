@@ -1264,4 +1264,145 @@ describe("tobestable", () => {
       );
     }
   });
+
+  // ── 28. Pyth-gated instructions (localnet, cloned Pyth receiver + Wormhole) ──
+  //
+  // buy_from_vault and arm_floor were the LAST instructions with no end-to-end
+  // coverage anywhere — and buy_from_vault is exactly the code changed three
+  // times on 2026-07-18 (F1 vault floor, F2 price gate, monotonic anchor) plus
+  // two added accounts. Only the pure helpers had unit tests.
+  //
+  // They need a FRESH Pyth price (staleness window is 15s), which needs the Pyth
+  // receiver, Wormhole, and the CURRENT guardian set cloned into the validator.
+  // Guardian set index is read from the Wormhole bridge config — it is 7 as of
+  // 2026-07-19, NOT the 4/5 an older guide would suggest. If Wormhole rotates the
+  // set, these tests break and the fix is to clone the new index (see ci.yml).
+  //
+  // A real Hermes update is posted here; its guardian signatures verify the same
+  // on localnet as anywhere, because they sign the price data, not the chain.
+
+  const SOL_USD_FEED_ID =
+    "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
+
+  async function withFreshPythPrice(makeIx: (priceUpdate: anchor.web3.PublicKey) => Promise<{
+    instruction: anchor.web3.TransactionInstruction;
+    signers: anchor.web3.Signer[];
+  }>) {
+    const { PythSolanaReceiver } = await import("@pythnetwork/pyth-solana-receiver");
+    const res = await fetch(
+      `https://hermes.pyth.network/v2/updates/price/latest?ids[]=${SOL_USD_FEED_ID}&encoding=base64`
+    );
+    const hermes: any = await res.json();
+
+    const receiver = new PythSolanaReceiver({
+      connection: provider.connection,
+      wallet: authority as any,
+    });
+    const builder = receiver.newTransactionBuilder({ closeUpdateAccounts: true });
+    await builder.addPostPriceUpdates([hermes.binary.data[0]]);
+    await builder.addPriceConsumerInstructions(async (getPriceUpdateAccount: any) => {
+      const pu = getPriceUpdateAccount(SOL_USD_FEED_ID);
+      return [await makeIx(pu)];
+    });
+    const txs = await builder.buildVersionedTransactions({
+      computeUnitPriceMicroLamports: 50000,
+    });
+    return receiver.provider.sendAll(txs, { skipPreflight: false });
+  }
+
+  it("buy_from_vault rejects below peg — the F2 price gate (Pyth posted on localnet)", async () => {
+    assert.ok(poolInfo, "needs the configured pool");
+    // The seeded pool is ~200k TOBE against 2 SOL, so TOBE is worth a tiny
+    // fraction of $1. Before the F2 fix the vault would have sold at $1 anyway,
+    // handing over an asset worth far less than it booked — and profitably so for
+    // the founder, who gets 50% of the proceeds back. It must now revert.
+    const buyerTobe = (
+      await (await import("@solana/spl-token")).getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        (authority as any).payer,
+        tobeMint.publicKey,
+        authority.publicKey
+      )
+    ).address;
+
+    let threw = false;
+    let msg = "";
+    try {
+      await withFreshPythPrice(async (priceUpdate) => ({
+        instruction: await program.methods
+          .buyFromVault(new anchor.BN(100_000_000)) // 0.1 SOL
+          .accounts({
+            buyer: authority.publicKey,
+            mintState: mintStatePda,
+            vaultAuthority: vaultAuthorityPda,
+            vaultTokenAccount: vaultTokenPda,
+            treasury: treasury.publicKey,
+            founder: authority.publicKey,
+            raydiumToken0Vault: poolInfo!.vaultA,
+            raydiumToken1Vault: poolInfo!.vaultB,
+            buyerTobe,
+            pythPriceUpdate: priceUpdate,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: anchor.web3.SystemProgram.programId,
+          })
+          .instruction(),
+        signers: [],
+      }));
+    } catch (err: any) {
+      threw = true;
+      msg = err.toString() + (err.logs ? "\n" + err.logs.join("\n") : "");
+    }
+
+    assert.ok(threw, "buy_from_vault must reject while TOBE trades below $1");
+    assert.ok(
+      /PriceBelowPeg|6\d{3}/.test(msg),
+      `expected PriceBelowPeg, got: ${msg.slice(0, 400)}`
+    );
+    console.log("  ✓ F2 gate held — vault refused to sell below peg");
+  });
+
+  it("arm_floor rejects a non-authority — the H1 gate (Pyth posted on localnet)", async () => {
+    assert.ok(poolInfo, "needs the configured pool");
+    // H1: arm_floor used to be permissionless, so anyone could flash-skew the
+    // pool across $1, latch floor_active permanently, and unlock a
+    // vault_sol_reserve drain. This is the check that was previously provable
+    // only by a manual devnet run.
+    const intruder = anchor.web3.Keypair.generate();
+    const sig = await provider.connection.requestAirdrop(intruder.publicKey, 1_000_000_000);
+    await provider.connection.confirmTransaction(sig);
+
+    const before = await program.account.mintState.fetch(mintStatePda);
+
+    let threw = false;
+    let msg = "";
+    try {
+      await withFreshPythPrice(async (priceUpdate) => ({
+        instruction: await program.methods
+          .armFloor()
+          .accounts({
+            authority: intruder.publicKey, // NOT mint_state.authority
+            mintState: mintStatePda,
+            raydiumToken0Vault: poolInfo!.vaultA,
+            raydiumToken1Vault: poolInfo!.vaultB,
+            pythPriceUpdate: priceUpdate,
+          })
+          .instruction(),
+        signers: [intruder],
+      }));
+    } catch (err: any) {
+      threw = true;
+      msg = err.toString() + (err.logs ? "\n" + err.logs.join("\n") : "");
+    }
+
+    assert.ok(threw, "arm_floor must reject a non-authority signer");
+    assert.ok(
+      /Unauthorized|ConstraintRaw|6002/.test(msg),
+      `expected Unauthorized, got: ${msg.slice(0, 400)}`
+    );
+
+    // The hard invariant, independent of which error fired.
+    const after = await program.account.mintState.fetch(mintStatePda);
+    assert.equal(after.floorActive, before.floorActive, "non-authority must not arm the floor");
+    console.log("  ✓ H1 gate held — floor stayed disarmed");
+  });
 });

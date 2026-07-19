@@ -186,6 +186,12 @@ jobs:
             --clone D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2 \
             --clone DNXgeM9EiiaAbaWvwjHj9fQQLAX5ZsfHyvmYUNRAdNC8 \
             --clone So11111111111111111111111111111111111111112 \
+            --clone-upgradeable-program rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ \
+            --clone-upgradeable-program HDwcJBJXjL9FpJ7UBsYBtaDjsBUhuLCUYoz3zr8SWWaQ \
+            --clone DaWUKXCyXsnzcvLUyeJRWou8KTn7XtadgTsdhJ6RHS7b \
+            --clone 7iUNa1go9BPLC4Y8KM1RJErtbv2qcVQ62UruXA3yokPF \
+            --clone 6GaHgiaQg9Pg346xHq9m7vQ9rJtnH83gQKqJoiAxQa7D \
+            --clone HstYgN21fgNmutTVXjBw54n4ryvP3WrCFbMAjnbdbTzf \
             --upgradeable-program "$PROGRAM_ID" target/deploy/neco_token.so "$WALLET" &
           for i in $(seq 1 90); do
             solana cluster-version >/dev/null 2>&1 && break || sleep 2
