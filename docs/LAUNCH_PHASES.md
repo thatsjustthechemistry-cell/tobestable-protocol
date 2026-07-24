@@ -124,6 +124,38 @@ claims program *and* upgrade authority both sit with the multisig — false unti
 
 Your only involvement is the Step 9 council vote.
 
+> 🔴 **STEP 9 IS ONE-WAY. The pool you record is the protocol's pool forever.**
+>
+> `set_pool_config` opens with `require!(mint_state.raydium_pool_state == Pubkey::default())`
+> — it only runs while the field is empty, sets it once, and **no instruction can ever
+> reset or change it**. There is no `update_pool_config`, and `migrate_state_v2` only
+> reallocs appended fields. The sole escape is a DAO-approved **program upgrade**.
+>
+> Everything downstream is bound to that one pool: every `flush_lp_to_raydium` deposit
+> for the life of the protocol, `arm_floor`'s on-chain price read, and the 30% floor
+> baseline captured at config time.
+>
+> **Before voting the Step 9 proposal through, verify the community-created pool:**
+> - It is a **Raydium CPMM** pool (the contract's `AccountLoader<PoolState>` validates
+>   against the mainnet CPMM program `CPMMoo8L…`; anything else is rejected outright).
+> - Legs are exactly **TOBE and native wSOL**, both 9-decimal — the contract enforces
+>   this, and `arm_floor`'s price math depends on the decimals cancelling.
+> - The **AMM config / fee tier** is one you are willing to live with permanently. The
+>   contract does *not* check this, so it is the one parameter that can be wrong in a
+>   way that still passes and still binds you.
+> - The pool has sane initial pricing — the baseline captured here anchors the floor.
+>
+> A bad pool is not recoverable by proposal. Check it before the vote, not after.
+
+> 📈 **Other markets, for reference.** The protocol is bound to this one Raydium pool,
+> but **TOBE is an ordinary SPL token** — anyone can create pools on Orca, Meteora or
+> elsewhere with no protocol change and no permission. Two consequences worth knowing:
+> the **$1 ceiling works on every venue automatically** (`buy_from_vault` does not care
+> where you sell, so above-peg arbitrage is market-agnostic); but **protocol liquidity
+> only ever flows to the Raydium pool**, so other venues live on community liquidity
+> alone. Jupiter (Phase 6) is the highest-leverage move here — it is a router, not a
+> venue, so it exposes TOBE to every wallet and aggregator that queries it, for free.
+
 ---
 
 ## Phase 5 — Arm the floor
@@ -168,6 +200,13 @@ on both council partners being available to vote.
 
 **Phase 4 onward runs on its own schedule.** You are a participant, not the driver.
 
-The two moments that carry real, irreversible risk are **Step 5.5** (wrong target =
-program bricked forever) and **losing 2 of 3 council keys after Phase 2** (governance
-frozen permanently, no recovery path). Everything else is retryable.
+**Three moments carry irreversible risk.** Everything else is retryable:
+
+| When | What goes wrong | Recoverable? |
+|---|---|---|
+| **Step 5.5** | wrong upgrade-authority target | ❌ program immutable forever, ~4.53 SOL lost |
+| **Step 9** | a bad pool recorded by `set_pool_config` | ⚠️ only via a DAO program upgrade |
+| **After Phase 2** | 2 of 3 council keys lost | ❌ governance frozen permanently |
+
+Step 5.5 and Step 9 are both *one-shot writes you vote through* — the moment to catch a
+mistake is while reading the proposal, not after executing it.
