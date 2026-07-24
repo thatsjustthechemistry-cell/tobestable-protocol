@@ -9,13 +9,28 @@
 //
 // Usage:
 //   TOBE_MINT=<MAINNET_MINT_PUBKEY> node scripts/mainnet-create-raydium-pool.js \
-//     [--keypair <path>] [--seed-tobe 1000] [--seed-sol 0.0191] [--yes]
+//     [--keypair <path>] [--expect-address <pubkey>] \
+//     [--seed-tobe 1000] [--seed-sol 0.0191] [--yes]
 //
-// --keypair  Signer keypair file. Defaults to ~/.config/solana/id.json (the
-//            DEPLOY wallet). If seeding from Eis6 or any other wallet, pass its
-//            keypair explicitly — the default will otherwise silently create the
-//            pool from the wrong account.
-// --yes      Skip the confirmation pause. Omit it the first time.
+// --keypair         Signer keypair file. Defaults to ~/.config/solana/id.json
+//                   (the DEPLOY wallet). If seeding from Eis6 or any other
+//                   wallet, pass its keypair explicitly — the default will
+//                   otherwise silently create the pool from the wrong account.
+//                   Accepts EITHER format:
+//                     • solana-keygen JSON array   [12,34,...]
+//                     • base58 secret key string   "4xY7..."   <- what
+//                       Backpack/Phantom "Export Private Key" gives you.
+// --expect-address  Public key this keypair MUST derive to; aborts if it does
+//                   not. Filenames lie — this repo has already had a backup
+//                   that carried the wrong key and looked fine until the
+//                   address was derived. Use it every time.
+// --yes             Skip the confirmation pause. Omit it the first time.
+//
+// Seeding from Eis6 (the team free-mint wallet), the full invocation is:
+//   TOBE_MINT=<mint> node scripts/mainnet-create-raydium-pool.js \
+//     --keypair ~/eis6.json \
+//     --expect-address Eis6SPak12JXqunZqLqgHneomygF1ouuoRk5PFXB5Bvf \
+//     --seed-sol 5 --seed-tobe 262144
 //
 // SEED RATIO — keep it honest. The default (1000 TOBE + 0.0191 SOL) is exactly
 // what a round-1 minter pays: 10 SOL / 524,288 TOBE. Seeding BIGGER is good
@@ -67,6 +82,7 @@ function parseArgs() {
     seedTobe: 1000,
     seedSolLamports: 19_100_000,
     keypair: null,
+    expectAddress: null,
     yes: false,
   };
   for (let i = 0; i < args.length; i++) {
@@ -76,12 +92,70 @@ function parseArgs() {
       out.seedSolLamports = Math.floor(sol * 1e9);
     }
     else if (args[i] === '--keypair') out.keypair = args[++i];
+    else if (args[i] === '--expect-address') out.expectAddress = args[++i].trim();
     else if (args[i] === '--yes' || args[i] === '-y') out.yes = true;
   }
   return out;
 }
 
-function loadKeypair(explicitPath) {
+// Accepts BOTH on-disk key formats:
+//   1. solana-keygen JSON byte array  -> [12,34,...]  (64 numbers)
+//   2. base58 secret key string       -> "4xY7..."     (Backpack / Phantom
+//      "Export Private Key" produce this, NOT the JSON array)
+// Format 2 matters because the pool is seeded from Eis6, a Backpack wallet.
+function decodeSecretKey(raw, resolved) {
+  const text = raw.trim();
+
+  if (text.startsWith("[")) {
+    let arr;
+    try {
+      arr = JSON.parse(text);
+    } catch (e) {
+      console.error(`❌ ${resolved} looks like JSON but will not parse: ${e.message}`);
+      process.exit(1);
+    }
+    if (!Array.isArray(arr) || (arr.length !== 64 && arr.length !== 32)) {
+      console.error(`❌ ${resolved}: expected a 64-byte (or 32-byte seed) array, got length ${Array.isArray(arr) ? arr.length : typeof arr}.`);
+      process.exit(1);
+    }
+    return Uint8Array.from(arr);
+  }
+
+  // base58 — the wallet-export format.
+  if (/^[1-9A-HJ-NP-Za-km-z]+$/.test(text)) {
+    let bs58;
+    try {
+      // Comes in transitively with @solana/web3.js; not declared directly so
+      // that package-lock is not churned before launch.
+      const mod = require("bs58");
+      bs58 = mod.default || mod;
+    } catch (e) {
+      console.error('❌ Base58 key detected but bs58 is unavailable.');
+      console.error('   Convert it to a JSON byte array and retry, or run `npm i bs58`.');
+      process.exit(1);
+    }
+    let bytes;
+    try {
+      bytes = bs58.decode(text);
+    } catch (e) {
+      console.error(`❌ ${resolved}: not valid base58 — ${e.message}`);
+      process.exit(1);
+    }
+    if (bytes.length !== 64) {
+      console.error(`❌ ${resolved}: base58 decoded to ${bytes.length} bytes, expected 64.`);
+      console.error('   A 32-byte value is a seed, not a full secret key.');
+      process.exit(1);
+    }
+    return Uint8Array.from(bytes);
+  }
+
+  console.error(`❌ ${resolved}: unrecognised key format.`);
+  console.error('   Expected a solana-keygen JSON array ([12,34,...]) or a');
+  console.error('   base58 secret key string (Backpack/Phantom export).');
+  process.exit(1);
+}
+
+function loadKeypair(explicitPath, expectAddress) {
   // Explicit --keypair wins. Otherwise fall back to the solana CLI default,
   // which is the DEPLOY wallet — correct for some runs, wrong for others, so
   // the resolved path is always printed below.
@@ -94,17 +168,38 @@ function loadKeypair(explicitPath) {
     if (!explicitPath) {
       console.error('   The default is the DEPLOY wallet. To seed from another');
       console.error('   wallet (e.g. Eis6), pass --keypair <path> explicitly.');
-      console.error('   Note: a wallet that exists only as a browser seed phrase');
-      console.error('   has no keypair file — export it, or use the Raydium web UI.');
+    } else {
+      console.error('   A wallet that exists only as a browser seed phrase has no');
+      console.error('   keypair file — export it (base58 is fine), or use the');
+      console.error('   Raydium web UI and record the addresses by hand.');
     }
     process.exit(1);
   }
+
+  const keypair = Keypair.fromSecretKey(
+    decodeSecretKey(fs.readFileSync(resolved, "utf8"), resolved)
+  );
+
+  // Filenames lie. This repo has already had one backup that carried the wrong
+  // key and looked correct until the address was derived from it — so if the
+  // caller says which wallet they expect, prove it before spending anything.
+  if (expectAddress) {
+    const actual = keypair.publicKey.toBase58();
+    if (actual !== expectAddress) {
+      console.error('❌ Keypair does not match --expect-address.');
+      console.error(`   file:     ${resolved}`);
+      console.error(`   expected: ${expectAddress}`);
+      console.error(`   actual:   ${actual}`);
+      process.exit(1);
+    }
+    console.log(`✅ Keypair matches --expect-address (${actual})`);
+  }
+
   return {
-    keypair: Keypair.fromSecretKey(
-      Uint8Array.from(JSON.parse(fs.readFileSync(resolved, "utf8")))
-    ),
+    keypair,
     path: resolved,
     wasExplicit: Boolean(explicitPath),
+    verified: Boolean(expectAddress),
   };
 }
 
@@ -127,11 +222,11 @@ async function main() {
   }
   const TOBE_MINT = new PublicKey(process.env.TOBE_MINT);
 
-  const { seedTobe, seedSolLamports, keypair: keypairArg, yes } = parseArgs();
+  const { seedTobe, seedSolLamports, keypair: keypairArg, expectAddress, yes } = parseArgs();
   const SEED_TOBE_RAW = new BN(seedTobe).mul(new BN("1000000000")); // 9 decimals
   const SEED_SOL_LAMPORTS = new BN(seedSolLamports);
 
-  const { keypair: wallet, path: keypairPath, wasExplicit } = loadKeypair(keypairArg);
+  const { keypair: wallet, path: keypairPath, wasExplicit, verified } = loadKeypair(keypairArg, expectAddress);
 
   // The public RPC is rate-limit-prone under real load (hit repeatedly during
   // devnet governance testing). Override with a dedicated mainnet endpoint,
@@ -151,7 +246,7 @@ async function main() {
 
   console.log("=== Mainnet Raydium pool creation ===");
   console.log("Signer keypair:          ", keypairPath, wasExplicit ? "(--keypair)" : "(DEFAULT — deploy wallet)");
-  console.log("Caller wallet:           ", wallet.publicKey.toBase58());
+  console.log("Caller wallet:           ", wallet.publicKey.toBase58(), verified ? "✅ verified" : "⚠️  unverified — pass --expect-address");
   console.log("TOBE mint:               ", TOBE_MINT.toBase58());
   console.log("wSOL mint:               ", NATIVE_MINT.toBase58());
   console.log("TOBE is token_0 (mintA): ", tobeFirst);
