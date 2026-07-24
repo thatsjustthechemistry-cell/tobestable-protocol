@@ -19,13 +19,21 @@ Every phase below maps to numbered Steps in it.
 | Wallet | Role | Has | Needs |
 |---|---|---|---|
 | `BzvTL4PY…` | deploy wallet | **0 SOL** | **~6** |
-| `Eis6…B5Bvf` | council #1 + team/day-one mint | 0.0043 | ~0.05 |
+| `Eis6…B5Bvf` | council #1 + team mint + **pool creator** | 0.0043 | ~0.05 **+ pool seed** |
 | `8aVTS…9vwH2` | council #2 | 0.0025 | ~0.05 |
 | `EnRAy…YuiXo` | council #3 | 0 | ~0.03 |
 
-**~6.13 SOL total.** The deploy wallet is the hard blocker — it pays the ~4.53 SOL
-program rent. Fund it to ~6 so a failed first deploy can be reclaimed and retried
-without stranding you.
+**~6.13 SOL minimum**, plus whatever you seed the pool with. The deploy wallet is the
+hard blocker — it pays the ~4.53 SOL program rent. Fund it to ~6 so a failed first
+deploy can be reclaimed and retried without stranding you.
+
+**Eis6 needs more than vote money.** It creates the Raydium pool (Phase 4), which costs
+the Raydium CPMM creation fee + the seed SOL itself + fees. Budget its funding from the
+seed-ratio table in Phase 4 — e.g. a 1 SOL seed means Eis6 needs roughly **1.25 SOL**,
+not 0.05.
+
+> 💡 The ~1.4 SOL left in the deploy wallet after Steps 1–4 is a natural source for
+> funding Eis6's pool seed, if you would rather not add new money.
 
 **Also required before Phase 2:**
 
@@ -116,13 +124,74 @@ claims program *and* upgrade authority both sit with the multisig — false unti
   vault gets the other 50%, **5 SOL → `pool_sol_reserve`**, **5 SOL → `vault_sol_reserve`**.
 - **Step 8** — the first minter (or anyone holding TOBE) creates the TOBE/wSOL Raydium
   pool. External by design; `seed_pool` was removed in the M1 audit fix.
+  **→ In practice this is you. See "Bootstrapping the pool" below.**
 - **Step 9** — council 2-of-3 proposal runs `set_pool_config`, recording the pool and
   capturing the 30% floor baseline. Use `propose-set-pool-config.js`, not hand-typed hex.
 - **Step 10** — anyone calls `flush_lp_to_raydium` once ≥1 SOL has accumulated. Deposits
   SOL+TOBE into Raydium and **burns the LP receipt — the liquidity the protocol adds is
   permanent.**
 
-Your only involvement is the Step 9 council vote.
+### Bootstrapping the pool — the plan (decided 2026-07-19)
+
+`MAINNET_LAUNCH.md` says Step 8 is "paid by the community minter". That is an
+assumption, not a plan: on day one there may be no outsider holding TOBE. **The plan is
+that Necdet does it**, funding Eis6 separately from the deploy wallet:
+
+1. **Eis6 free-mints** (team allocation, browser + Backpack) → receives **524,288 TOBE**
+   from round 1. Costs only tx fees.
+2. **Eis6 creates the pool** with part of that TOBE plus SOL funded to it separately.
+3. **Burn the seed LP immediately** (see below).
+
+> 🔑 **TOOLING BLOCKER — solve before launch day.**
+> `scripts/mainnet-create-raydium-pool.js` hard-codes its signer:
+> ```js
+> const keypairPath = path.join(os.homedir(), ".config/solana/id.json");
+> ```
+> There is no `--keypair` override, and **`id.json` is the deploy wallet, not Eis6**.
+> Eis6 exists only as a Backpack seed phrase — there is no keypair file for it. Funding
+> Eis6 does not fix this. Pick one **before** the day:
+> - **Patch the script** to accept `--keypair` (~5 lines). Preferred — keeps
+>   `.mainnet-pool.json` written automatically, which `propose-set-pool-config.js` reads.
+> - **Raydium web UI** with Backpack connected. No file needed, but you must collect the
+>   5 pool addresses by hand and write the JSON yourself.
+> - **Export Eis6's key to a file** and point `solana config` at it. Works, but puts a
+>   council key on disk.
+
+> 💰 **Seed ratio — keep it honest.** The script default (`1000 TOBE + 0.0191 SOL`) is
+> exactly what a round-1 minter pays: **10 SOL ÷ 524,288 TOBE**. Seeding *bigger* is
+> good (deeper pool), but hold the ratio or you move the opening price:
+>
+> | SOL | Pair with | |
+> |---|---|---|
+> | 0.5 | 26,214 TOBE | |
+> | 1 | 52,429 TOBE | |
+> | 5 | 262,144 TOBE | |
+> | 10 | 524,288 TOBE | the entire round-1 free mint |
+>
+> ⚠️ Seeding **above** this ratio prices team-allocated tokens higher than minters paid.
+> That is the one version of this that reads badly, and it is visible on-chain forever.
+
+> 🔥 **BURN THE SEED LP — do not skip.** Whoever creates the pool receives LP tokens, and
+> `flush_lp_to_raydium` burns only the **protocol's** LP, never yours. Left alone, the
+> team holds a withdrawable liquidity position — exactly the shape that gets screenshotted
+> as a rug vector. Burn it right after Step 8:
+> ```bash
+> spl-token burn <LP_TOKEN_ACCOUNT> <AMOUNT>
+> ```
+> Keep the tx signature. This is what makes the launch thread's "no LP exists in anyone's
+> wallet, including mine" answer true — see `tobe-mint/docs/launch-thread-postable.md`.
+
+Your only *protocol* involvement is the Step 9 council vote — but the pool itself is
+yours to create.
+
+> ⛽ **Reserves stay empty until a real buyer arrives.** `flush_lp_to_raydium` needs
+> **≥1 SOL in `pool_sol_reserve`**, and that only fills from **paid** mints (5 SOL per
+> 10 SOL round). **Team free mints contribute nothing** — `lib.rs:300`: *"Team free
+> rounds transfer nothing — no SOL enters either reserve."* So until one external minter
+> pays 10 SOL, there is no protocol liquidity to flush and no floor reserve building.
+> That is the fair-launch design working as intended — the protocol only ever holds what
+> minters put in — but it means **the first paid mint is a genuine external dependency**
+> that no amount of founder funding can substitute for.
 
 > 🔴 **STEP 9 IS ONE-WAY. The pool you record is the protocol's pool forever.**
 >
