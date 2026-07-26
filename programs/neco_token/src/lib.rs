@@ -127,12 +127,19 @@ fn tobe_at_or_above_one_usd(
 const VAULT_FLOOR_BPS: u128 = 3000; // 30%
 
 /// Pure vault-floor gate: would removing `tobe_out` leave at least
-/// `VAULT_FLOOR_BPS` of `floor_baseline` in the vault? Shared by
-/// `flush_lp_to_raydium` and `buy_from_vault` so the arithmetic cannot drift.
+/// `VAULT_FLOOR_BPS` of `floor_baseline` in the vault?
 /// Errors (rather than returning false) if the withdrawal underflows the vault.
 ///
-/// ⚠️ The BASELINE is the security-critical choice, not the percentage — see the
-/// two call sites, which deliberately pass different ones:
+/// ⚠️ **Only `flush_lp_to_raydium` calls this now.** `buy_from_vault` used it as the
+/// Round-5 F1 mitigation; that floor was removed from the buy path by founder decision
+/// on 2026-07-26 (see the note there and SELF_AUDIT.md). The floor is retained on flush
+/// because it is load-bearing there rather than a policy choice: flush needs vault TOBE
+/// to pair with `pool_sol_reserve` SOL, and nothing else drains that reserve.
+///
+/// ⚠️ The BASELINE is the security-critical choice, not the percentage. The discussion
+/// below is kept because it is what makes the retained flush floor meaningful, and
+/// because `buy_from_vault` still derives its founder-cut high-water mark from the same
+/// monotonic quantity:
 ///
 /// * A baseline snapshotted once (`vault_tobe_at_config`) protects a FIXED
 ///   QUANTITY. As the vault keeps growing with every mint, that quantity decays
@@ -522,36 +529,52 @@ pub mod neco_token {
             TobeError::InsufficientVault
         );
 
-        // ─── F1 fix (Round 5): bound vault extraction on this path too ───
+        // ─── NO VAULT FLOOR ON THIS PATH (deliberate, 2026-07-26) ───
         //
-        // buy_from_vault used to be limited only by `tobe_out <= vault_balance`,
-        // i.e. the vault was drainable to ZERO here, while flush_lp_to_raydium
-        // has always been floored at 30% of the baseline. That asymmetry matters
-        // because the founder receives 50% of the proceeds: when the founder is
-        // the buyer, founder_cut returns to them, so their net cost is half and
-        // their break-even drops from $1.00 to $0.50 — making it profitable to
-        // drain the ceiling reserve while TOBE trades BELOW peg. The reserve is
-        // exactly what backs the $1 ceiling.
+        // Round 5's F1 mitigation applied `flush_lp_to_raydium`'s 30% floor here too,
+        // capping extraction at 70% of the vault. That floor was REMOVED from this
+        // instruction by founder decision: it only ever binds after ~188M TOBE has
+        // been sold at $1 (~$188M of arbitrage), and at exactly that point it starts
+        // REFUSING genuine buyers — which breaks the $1 ceiling upward anyway. It
+        // reserved 30% that could never be used for the very purpose it was held for.
         //
-        // Applying the same floor caps that for ANY caller, which is the point:
-        // a `buyer != founder` check alone would be bypassed with a second wallet.
+        // ⚠️ CONSEQUENCES, accepted knowingly (see SELF_AUDIT.md "F1 residual"):
         //
-        // Requiring pool config closes the companion gap — vault_tobe_at_config
-        // (the floor baseline) is 0 until set_pool_config runs, so the floor
-        // would be 0 in that window. Nothing legitimate needs this instruction
-        // before then: buy_from_vault is the ceiling-arbitrage path, and with no
-        // pool there is no market to arbitrage against.
+        //  * F1 is now UNBOUNDED on this path. The founder receives 50% of proceeds,
+        //    so as the buyer their net cost is half — they can acquire the ENTIRE
+        //    vault at an effective 50% off, not merely 70% of it. (A `buyer !=
+        //    founder` check does not help; it is bypassable with a second wallet.)
+        //  * `flush_lp_to_raydium` can be starved. It pairs `pool_sol_reserve` SOL
+        //    with vault TOBE, and nothing else consumes that reserve — so if this
+        //    path drains the vault below flush's own (retained) floor, future
+        //    accumulation there is stranded with no instruction able to release it.
+        //    Previously the buy floor (30% of the GROWING total_minted/2) sat well
+        //    above flush's floor (30% of the EARLY vault_tobe_at_config snapshot),
+        //    so it shielded flush as a side effect. That shield is gone.
+        //
+        // NOT a consequence: "the ceiling becomes exhaustible". It always was — the
+        // ceiling works only while the vault holds TOBE to sell. The floor made it
+        // exhaust EARLIER (at 70% depletion, with the last 30% reserved and unusable
+        // for the very purpose it was held for). Removing it EXTENDS ceiling capacity
+        // from ~188M to the full ~268.7M TOBE.
+        //
+        // H2 is NOT reopened by this: the founder cut is paid only on new net vault
+        // depletion, so round trips still earn nothing regardless of any floor.
+        //
+        // flush_lp_to_raydium KEEPS its floor — it is load-bearing there, not a
+        // policy choice. See the note at that call site.
+        //
+        // Pool config is still required, for the F2 price gate below/above: the gate
+        // reads the recorded pool's reserves, and there is no market to arbitrage
+        // against before a pool exists.
         require!(
             mint_state.raydium_pool_state != Pubkey::default(),
             TobeError::PoolNotConfigured
         );
-        // Baseline = total_minted / 2, i.e. what the vault would hold if nothing
-        // had ever been withdrawn. This is MONOTONIC (total_minted only grows), so
-        // the floor rises with the vault and cannot be ratcheted down by repeated
-        // withdrawals — which is what makes it a real cumulative bound on
-        // extraction. The earlier `vault_tobe_at_config` snapshot did not do this:
-        // taken at Step 9 it decayed to ~1% of the round-1024 vault, leaving
-        // ~99% extractable rather than the intended 70%.
+        // Still needed — not as a floor, but as the baseline for the founder-cut
+        // depletion high-water mark below. `total_minted / 2` is what the vault would
+        // hold if nothing had ever been withdrawn; it is MONOTONIC (total_minted only
+        // grows), which is what makes the high-water mark un-ratchetable.
         //
         // Exact by construction: each mint gives the minter total_tokens/2 and the
         // vault the remainder, and total_tokens is always even (x 1e9 decimals).
@@ -559,10 +582,6 @@ pub mod neco_token {
             .total_minted
             .checked_div(2)
             .ok_or(TobeError::MathOverflow)?;
-        require!(
-            vault_withdrawal_within_floor(mint_state.vault_balance, never_withdrawn, tobe_out)?,
-            TobeError::VaultFloorBreach
-        );
 
         // 1. Split proceeds DAO/founder. The founder's nominal half is paid only on
         //    the portion of this buy that takes the vault to a NEW net-depletion high
@@ -1989,9 +2008,12 @@ mod pyth_math_tests {
         assert!(tobe_at_or_above_one_usd(1, 1_000_000_000, -1, -8).is_err());
     }
 
-    // ── vault floor (F1 fix) ──
-    // Baseline 1000 => floor is 300 (30%). Guards flush_lp_to_raydium AND
-    // buy_from_vault, so no caller can drain the ceiling reserve past it.
+    // ── vault floor ──
+    // Baseline 1000 => floor is 300 (30%). Guards flush_lp_to_raydium ONLY: the
+    // buy_from_vault floor (Round 5's F1 mitigation) was removed by founder decision
+    // on 2026-07-26. These still pin the helper's arithmetic for the flush path, and
+    // the monotonic-baseline reasoning they encode is what buy_from_vault's founder-cut
+    // high-water mark relies on.
 
     #[test]
     fn vault_floor_allows_withdrawal_down_to_the_line() {
@@ -2019,9 +2041,9 @@ mod pyth_math_tests {
         // lets repeated withdrawals walk the vault to zero, because each one lowers
         // the balance and therefore the next floor (1000 -> 300 -> 90 -> 27 -> ...).
         //
-        // buy_from_vault anchors to total_minted/2, which never decreases. Simulate
-        // a vault drained toward the floor while the baseline stays put: once at the
-        // line, EVERY further withdrawal must be refused.
+        // A monotonic baseline never decreases. Simulate a vault drained toward the
+        // floor while the baseline stays put: once at the line, EVERY further
+        // withdrawal must be refused.
         let baseline = 1000u64; // total_minted/2, monotonic
         let mut vault = 1000u64;
         // Walk down to the floor (300) in chunks.
@@ -2060,11 +2082,7 @@ mod pyth_math_tests {
         //
         // Applies to FLUSH, whose baseline (`vault_tobe_at_config`) is 0 until
         // set_pool_config runs — flush separately requires the pool to be configured,
-        // so it can never be called in that window.
-        //
-        // buy_from_vault is no longer exposed to this: its baseline is
-        // `total_minted / 2`, which is non-zero the moment anyone has minted. (It
-        // still requires pool config, but for the F2 price gate, not for this.)
+        // so it can never be called in that window. Flush is now the only caller.
         assert!(vault_withdrawal_within_floor(1000, 0, 1000).unwrap());
     }
 
