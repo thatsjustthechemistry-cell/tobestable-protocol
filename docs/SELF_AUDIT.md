@@ -22,30 +22,47 @@ That is **~201 added lines** in the core program, including two paths that move 
 
 **What has been done on that delta instead (weaker assurance — do not read as an audit):**
 - **Round 5 (2026-07-18)** — a focused adversarial pass over the delta. It found **one Medium** (`F1`: founder self-dealing via `buy_from_vault`, unbounded by any vault floor) and **one Low** (`F2`: no price gate on `buy_from_vault`). See "Round 5" below. An earlier, shallower pass the same day reported "no exploitable defect" — that was **wrong**, and is corrected here: it only looked for missing constraints, and F1 is an economic/design flaw with every constraint correctly in place.
-- **Round 6 (2026-07-26)** — covered `1a68251` (the monotonic floor baseline), which landed *after* Round 5 and is a change to the F1 mitigation itself. Found **one High (`H2`)**: a `buy_from_vault` → `sell_to_vault` round trip drained `vault_sol_reserve` without limit. **Now bounded** by a cumulative founder-revenue cap (2% of mint revenue) — see the notice immediately below. `L1` (Low) remains open.
+- **Round 6 (2026-07-26)** — covered `1a68251` (the monotonic floor baseline), which landed *after* Round 5 and is a change to the F1 mitigation itself. Found **one High (`H2`)**: a `buy_from_vault` → `sell_to_vault` round trip drained `vault_sol_reserve` without limit. **Now closed** — the founder cut is paid only on new net vault depletion, so round trips earn nothing while genuine arbitrage earns the full 50% uncapped. See the notice immediately below. `L1` (Low) remains open.
 - The `arm_floor` peg-boundary math has Rust unit tests running in CI (`pyth_math_tests::arm_gate_*`).
 - The mocha integration suite now **passes 35/35** and is a required CI check (it had never been executed at all before 2026-07-18). As of 2026-07-19 it covers **every instruction**, including this delta: CI clones mainnet Raydium + the Pyth receiver + Wormhole into the local validator, creates a real TOBE/wSOL pool, and exercises `set_pool_config`, the `buy_from_vault` price gate (F2) and the `arm_floor` authority gate (H1). ⚠️ Coverage is not correctness: these assert the gates *fire*, not that the economic design is sound. Green CI is still not an audit.
 
-## ✅ H2 (Round 6) — BOUNDED BY A CUMULATIVE FOUNDER-REVENUE CAP
+## ✅ H2 (Round 6) — CLOSED: founder cut paid only on NEW net vault depletion
 
-**Fixed 2026-07-26.** Cumulative `founder_cut` is now capped at
-`FOUNDER_CUT_CAP_BPS` = **200 bps (2%) of cumulative mint revenue** (paid rounds ×
-`MINT_COST`, excluding free team mints). Since the protocol's loss per round-trip cycle
-is exactly `founder_cut`, capping the cumulative cut **provably caps the total leak**.
-Past the cap `buy_from_vault` routes 100% to the DAO and the round trip becomes
-value-neutral. New state field `founder_cut_paid`; whatever the cap withholds is
-reassigned to `dao_cut`, so the buyer always pays exactly `sol_in_lamports`.
+**Fixed 2026-07-26.** `buy_from_vault` now pays the founder's nominal 50% **only on the
+portion of a buy that takes the vault to a new net-depletion high.**
 
-Because the cap scales with mint revenue rather than being a fixed number of SOL, the
-bound is **scale-invariant**: founder revenue ≤ 2% of what minters paid in, and
-`vault_sol_reserve` exposure ≤ 4% of its own cumulative inflow (2× the cap — each cycle
-moves `founder_cut` out of the protocol and an equal amount into the DAO treasury).
+Net depletion is `total_minted / 2` (the monotonic "what the vault would hold had
+nothing ever left" baseline the floor already uses) minus the current balance.
+`max_vault_depletion` is its high-water mark. The founder is paid pro-rata on ground
+beyond that mark only:
 
-⚠️ **This BOUNDS H2; it does not eliminate it.** Up to the cap, the round trip remains
-profitable for the founder. Raising `FOUNDER_CUT_CAP_BPS` directly raises the maximum
-extraction. Unit-tested in CI (22 passing), including
-`h2_cumulative_extraction_cannot_exceed_the_cap`, which runs 10,000 cycles of 50 SOL
-against a fully-minted cap and asserts the bound holds and converges exactly.
+* **A round trip returns the TOBE**, so the vault comes back to a level the mark already
+  covers. The next buy breaks no new ground → **cut is 0**. This holds in both
+  directions (buy→sell and sell→buy) and however many times it is repeated.
+* **Genuine net demand** pushes the vault to a new low → the founder earns the full 50%
+  on the incremental portion, **uncapped**.
+
+It also correctly pays nothing when the vault re-sells TOBE it bought back through the
+floor: the protocol spent reserve SOL acquiring those tokens, so paying a cut to re-sell
+them would make the protocol net-negative on a wash.
+
+Whatever the founder does not earn is reassigned to `dao_cut`, so the buyer always pays
+exactly `sol_in_lamports`. New state fields `max_vault_depletion` (the mark) and
+`founder_cut_paid` (telemetry). Not a wire-format change — the `founder` account stays
+required on `BuyFromVault`.
+
+**Why not a cumulative cap.** A cap was implemented first and then replaced. It bounded
+the leak, but it was denominated in mint revenue (~10,160 SOL at full mint), while
+legitimate founder revenue scales with *arbitrage volume*, which is unbounded by it — up
+to ~$94M if the vault sells its full extractable 188M TOBE at $1. Any cap large enough
+to accommodate that would exceed the entire floor reserve by ~250×, i.e. provide no
+protection at all. **The cap could not separate self-dealing from other people's
+arbitrage, so it capped both.** The high-water mark separates them structurally: round
+trips do not deplete the vault, real demand does.
+
+Unit-tested in CI (23 passing), including `h2_round_trip_earns_the_founder_nothing`
+(1,000 repeated cycles, all earning 0), the reverse-order variant, pro-rata partial
+credit, and that genuine sequential demand earns the full half every time.
 
 **Two fixes that were considered and rejected as ineffective** — recorded because both
 are intuitive and both are wrong:
@@ -451,7 +468,7 @@ the blind spot Round 5 documented.
 
 | # | Severity | Finding | Status |
 |---|----------|---------|--------|
-| H2 | **High** | `buy_from_vault` → `sell_to_vault` round trip drains `vault_sol_reserve`, unbounded and repeatable; the 30% TOBE floor never binds | ✅ **Bounded** — cumulative founder-revenue cap (2% of mint revenue) |
+| H2 | **High** | `buy_from_vault` → `sell_to_vault` round trip drains `vault_sol_reserve`, unbounded and repeatable; the 30% TOBE floor never binds | ✅ **Closed** — founder cut paid only on new net vault depletion |
 | L1 | Low | Net selling raises `vault_balance` without raising `total_minted`, so the floor protects less than 30% of the *actual* balance | 🔴 Open |
 
 ### H2 — Round-trip drain of `vault_sol_reserve` (High)
@@ -497,8 +514,13 @@ and paid for. H2 is a different shape: the founder **returns** the TOBE, extract
 
 1. ~~Accrue `founder_cut` to a PDA~~ — does not fix H2, only defers the extraction.
 2. ~~Spread on `sell_to_vault`~~ — would need to exceed 50% to work.
-3. **Cumulative bound on `founder_cut`** — ✅ **shipped** (`FOUNDER_CUT_CAP_BPS`).
+3. ~~Cumulative bound on `founder_cut`~~ — implemented, then **replaced**: it bounded
+   the leak but capped legitimate arbitrage revenue with it, and no cap value both
+   protects the reserve and accommodates real volume.
 4. Accept and disclose.
+
+**Shipped instead:** pay the cut only on **new net vault depletion** (see above) — the
+one option that separates round trips from genuine demand rather than limiting both.
 
 Note that a floor on `vault_sol_reserve` is *not* a fix: paying that reserve out at $1
 is exactly what the floor feature does, so flooring it would disable the feature.
