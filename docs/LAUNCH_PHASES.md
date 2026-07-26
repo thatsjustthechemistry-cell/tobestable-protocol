@@ -242,6 +242,20 @@ proposal**, not permissionless.
 Launch tweet 4 discloses that the floor is not live on day one. That is deliberate —
 arming early was the H1 High-severity finding.
 
+### 🔧 Post-launch incident responses (both cheap, neither needs an upgrade)
+
+Two accepted risks from audit Round 7 have operational rather than code fixes. Full
+detail in [`SECURITY.md`](../SECURITY.md); the short version, for when it matters:
+
+| Symptom | Cause | Response |
+|---|---|---|
+| `sell_to_vault` fails **`VaultSolInsufficient`** — the $1 floor stops working | `vault_sol_reserve` drained. Possibly the **H3 pump**: anyone can cycle `sell_to_vault` → `buy_from_vault` at ~zero cost, moving the reserve into the DAO treasury | The reserve is a **System-owned PDA** — send SOL straight to its address from the DAO treasury. **A single 2-of-3 council transfer restores it.** No instruction, no upgrade. The funds were never stolen; they are in your own treasury |
+| `flush_lp_to_raydium` fails **`ReserveDustRemainder`** | **L3** — someone sent dust to `pool_sol_reserve`; the untracked excess is non-zero but below rent-exemption, so the payout is rejected | **Anyone** can unblock it: send the PDA enough SOL to lift the excess to the rent-exempt minimum (**~0.0009 SOL**). No authority needed |
+
+> Neither is an emergency. Both are self-healing once someone acts, and neither loses
+> protocol funds. Worth knowing *before* they happen, so a routine nuisance is not
+> mistaken for an exploit on launch day.
+
 ---
 
 ## Phase 6 — Listings
