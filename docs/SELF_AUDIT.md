@@ -348,13 +348,30 @@ that 70% at an effective 50% off. Closing it fully requires a change to the fee
 *model* (timelocked or DAO-held `founder_cut`), which the founder has reviewed and
 declined — the 50/50 split is disclosed and retained.
 
-> 🔴 **SUPERSEDED IN PART BY ROUND 6 (H2) — do not read the sentence above as a bound
-> on total extraction.** An earlier version of this paragraph claimed the floor
-> "genuinely bounds extraction at 70% of the vault". That is true of **TOBE** and false
-> of the **protocol**: Round 6 found that a `buy_from_vault` → `sell_to_vault` round
-> trip returns the TOBE to the vault, so `vault_balance` is restored and this floor
-> never binds, while `vault_sol_reserve` is drained by the full cycle amount — with no
-> floor of its own and no limit on repetition. See [Round 6](#round-6-opus-5-adversarial-pass-on-the-post-round-5-delta-2026-07-26).
+> 🔴 **THE PARAGRAPH ABOVE IS NO LONGER ACCURATE IN TWO WAYS. Read both.**
+>
+> **1. It never bounded total extraction (Round 6, H2).** An earlier version claimed
+> the floor "genuinely bounds extraction at 70% of the vault". True of **TOBE**, false
+> of the **protocol**: a `buy_from_vault` → `sell_to_vault` round trip returns the TOBE,
+> so `vault_balance` is restored, this floor never binds, and `vault_sol_reserve` is
+> drained by the full cycle amount. **Now closed** — the founder cut is paid only on new
+> net vault depletion, so round trips earn nothing. See
+> [Round 6](#round-6-opus-5-adversarial-pass-on-the-post-round-5-delta-2026-07-26).
+>
+> **2. The 70% bound no longer exists at all (2026-07-26, founder decision).** The 30%
+> floor was **removed from `buy_from_vault`**. It only ever bound after ~188M TOBE had
+> been sold at $1, and at exactly that point it began refusing genuine buyers — breaking
+> the $1 ceiling upward anyway, while reserving 30% that could never be used for the
+> purpose it was held for. **F1 is therefore now UNBOUNDED on this path: the founder can
+> acquire the ENTIRE vault at an effective 50% off, not merely 70% of it.**
+>
+> Accepted knowingly, alongside two further consequences: the **$1 ceiling is now
+> exhaustible** (an empty vault has no TOBE left to sell at $1, permanently), and
+> **`flush_lp_to_raydium` can be starved** — it pairs `pool_sol_reserve` SOL with vault
+> TOBE, nothing else consumes that reserve, so SOL accumulated after the vault falls
+> below flush's own floor is stranded with no instruction able to release it.
+>
+> `flush_lp_to_raydium` **keeps** its floor — load-bearing there, not a policy choice.
 
 What the **F2 price gate** additionally removes is the *value-destroying* half of
 this: the founder can no longer do it while TOBE trades below $1, which was the
