@@ -483,6 +483,105 @@ issue (economic, not syntactic) where an independent professional reviewer earns
 
 ---
 
+## Round 7: Opus 5 pass on the Round-6 fixes (2026-07-26)
+
+**Scope.** The code Round 6 produced: the founder-cut depletion high-water mark
+(`48ce503`) and the removal of the 30% floor from `buy_from_vault` (`a0b3630`) — i.e.
+auditing my own fixes, plus their interactions.
+
+| # | Severity | Finding | Status |
+|---|----------|---------|--------|
+| H3 | Low–Med | Anyone can pump `vault_sol_reserve` into the DAO treasury at ~zero cost via `sell_to_vault` → `buy_from_vault`, disabling the $1 floor until refilled | 📋 Accepted — recoverable, documented |
+| L2 | Low | `sell_to_vault` payout leaving a *dust* remainder fails opaquely inside the System program | ✅ Fixed |
+| L3 | Low | ~1 lamport sent to `pool_sol_reserve` blocks every `flush` for the same reason | ✅ Named error; remedy documented |
+
+### H3 — reserve-to-treasury pump (Low–Medium, accepted)
+
+The Round-6 fix removed the founder's *profit* from the round trip. It did not remove
+the *capability*. The cycle still runs, and still moves money — just to a different
+destination:
+
+| Step | Actor | `vault_sol_reserve` | Treasury |
+|---|---|---|---|
+| `sell_to_vault(T)` | −T TOBE, +$T | **−$T** | — |
+| `buy_from_vault($T)` | −$T, +T TOBE | — | **+$T** |
+| **Net** | **0** (minus fees) | **−$T** | **+$T** |
+
+The buy earns the founder nothing — the high-water mark already covers that ground — so
+100% routes to the DAO. The actor ends exactly where they started. Cost: fees and dust.
+Effect: `sell_to_vault` fails `VaultSolInsufficient` for everyone, so the $1 floor stops
+working.
+
+**Why this is accepted rather than fixed.** `vault_sol_reserve` is a **System-owned PDA
+with no data** — it is never `init`ed with space and is only ever funded by plain
+`system_program::transfer`. **Anyone, including the DAO, can refill it with an ordinary
+SOL transfer.** No instruction and no program upgrade is required, and the drained funds
+are sitting in the DAO's own treasury. So the attack is a temporary DoS that a single
+2-of-3 council transfer undoes, profits nobody, and never moves value out of the
+protocol. Any contract-level fix (a spread on either leg) would tax honest users
+permanently to deter a reversible nuisance. Operational response documented in
+`SECURITY.md` and `LAUNCH_PHASES.md`.
+
+> ⚠️ **Correction made during this round.** H3 was first written up as High, on the claim
+> that the floor would be "permanently disabled… restoring it needs a program upgrade."
+> That was **wrong** — it assumed the reserve was unreachable without an instruction.
+> Checking the PDA's ownership showed it is System-owned and openly fundable. Severity
+> reduced to Low–Medium and the "permanent" language removed.
+
+**Round 6's H2 was reported "closed". It was closed for what it was scoped to — founder
+profit.** This round found that scoping the question to *"does the founder still gain?"*
+missed *"who else does this cycle move money between?"* — the same
+isolation-versus-combination error this document names as the method's blind spot,
+committed one round after naming it.
+
+### L2 / L3 — System-PDA rent rule (Low, fixed)
+
+Both SOL reserves are System-owned PDAs with no data, so a payout must leave them either
+**rent-exempt** or at **exactly zero**; a non-zero remainder below the rent-exempt
+minimum is rejected by the runtime.
+
+* **L2 — `sell_to_vault`.** `sol_out <= vault_sol_lamports` alone is not sufficient: a
+  payout leaving dust passed that check and then failed inside the CPI with an opaque
+  error. **Fixed** via the pure, unit-tested `reserve_payout_leaves_valid_balance`, which
+  **explicitly permits an exact drain** so the entire reserve stays usable (the account
+  closes; the next mint's 5 SOL transfer recreates it). Dust now reverts with the named
+  `ReserveDustRemainder`.
+* **L3 — `flush_lp_to_raydium`.** Same rule, worse consequence. Flush moves
+  `pool_sol_balance`, the *tracked* figure, but the PDA's real balance can be higher
+  because anyone may send SOL to a System-owned PDA. **~1 lamport of untracked dust
+  blocks every flush.** The guard does not prevent this — the amount moved is fixed by
+  accounting — it converts an opaque failure into a diagnosable one. **Remedy, and it is
+  cheap and available to anyone: send the PDA enough SOL to lift the untracked excess to
+  the rent-exempt minimum (~0.0009 SOL).** Not fixed in code because draining the full
+  lamport balance instead would mean reworking audited flush accounting to defeat a
+  self-healing nuisance.
+
+4 new unit tests pin the boundary (exact drain valid, exactly-rent-exempt valid,
+one lamport less invalid, over-balance invalid). 27 passing.
+
+### Checked and found sound
+
+The **high-water mark mechanism held under everything tried against it**: minting raises
+`never_withdrawn` and `vault_balance` equally so net depletion is unmoved (free team
+mints included, since they mint tokens identically and only skip payment); a `flush`
+depleting the vault cannot let the founder claim ground it created, because `new_ground`
+is clamped to `tobe_out`; after net selling the pro-rata correctly pays the founder only
+on genuine depletion and routes the remainder to the DAO; the mark is strictly monotonic
+and never decreases; the `u128` intermediate cannot overflow at full-supply scale; and
+the mark is written before the transfers, so a failed transfer reverts it atomically.
+
+The **floor removal breaks nothing silently** — `flush` reverts cleanly on its own
+retained floor rather than misbehaving, and no other instruction depends on the vault
+holding a minimum. `total_minted` is always even, so `total_minted / 2` is exact.
+
+### Standing recommendation
+
+Unchanged, and reinforced: this round found a defect in the previous round's fix, and
+then a factual error in its own first write-up of that defect. **A focused paid review
+of this delta remains recommended.**
+
+---
+
 ## Round 6: Opus 5 adversarial pass on the post-Round-5 delta (2026-07-26)
 
 **Scope.** Commit `1a68251` (the monotonic floor baseline), which landed *after* the

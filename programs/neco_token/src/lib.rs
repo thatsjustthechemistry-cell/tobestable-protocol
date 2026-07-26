@@ -224,6 +224,31 @@ fn founder_cut_on_new_depletion(
     Ok((cut as u64, new_max))
 }
 
+/// Would paying out `sol_out` leave the reserve PDA in a state the System program
+/// will actually accept? (L2 fix, audit Round 7.)
+///
+/// `vault_sol_reserve` is a **System-owned PDA with no data** — it is never `init`ed
+/// with space, only funded by plain `system_program::transfer`. Such an account must
+/// end a transfer either **rent-exempt** or at **exactly zero**; a non-zero remainder
+/// below the rent-exempt minimum is rejected by the System program.
+///
+/// `sol_out <= reserve_lamports` alone is therefore not sufficient: a payout leaving a
+/// dust remainder passes that check and then fails deep inside the CPI with an opaque
+/// runtime error instead of a named one. Exact-drain is explicitly allowed, so the
+/// whole reserve stays usable (the account is simply closed, and the next mint's
+/// 5 SOL transfer recreates it).
+fn reserve_payout_leaves_valid_balance(
+    reserve_lamports: u64,
+    sol_out: u64,
+    rent_exempt_min: u64,
+) -> bool {
+    match reserve_lamports.checked_sub(sol_out) {
+        None => false,          // insufficient — reported separately
+        Some(0) => true,        // exact drain: account closes, allowed
+        Some(rem) => rem >= rent_exempt_min,
+    }
+}
+
 fn vault_withdrawal_within_floor(
     vault_balance: u64,
     floor_baseline: u64,
@@ -704,6 +729,17 @@ pub mod neco_token {
         //    pattern as flush_lp_to_raydium for pool_sol_reserve.)
         let vault_sol_lamports = ctx.accounts.vault_sol_reserve.lamports();
         require!(vault_sol_lamports >= sol_out, TobeError::VaultSolInsufficient);
+        // L2 (Round 7): the reserve is a System-owned PDA with no data, so it must end
+        // this transfer either rent-exempt or at exactly zero. Without this check a
+        // payout leaving a DUST remainder passes the line above and then fails inside
+        // the System program with an opaque error. Exact-drain is allowed on purpose,
+        // so the full reserve remains usable — the account closes and the next mint's
+        // 5 SOL transfer recreates it.
+        let rent_exempt_min = Rent::get()?.minimum_balance(0);
+        require!(
+            reserve_payout_leaves_valid_balance(vault_sol_lamports, sol_out, rent_exempt_min),
+            TobeError::ReserveDustRemainder
+        );
         let vault_sol_seeds: &[&[u8]] = &[b"vault_sol_reserve", &[ctx.bumps.vault_sol_reserve]];
         anchor_lang::system_program::transfer(
             CpiContext::new_with_signer(
@@ -947,6 +983,30 @@ pub mod neco_token {
         // 1. Move SOL from pool_sol_reserve PDA → wsol_temp via system program
         //    (PDA-signed transfer; can't direct-mutate lamports since pool_sol_reserve
         //    is owned by the system program, not by our program).
+        //
+        // L3 (Round 7): same System-owned-PDA rent rule as sell_to_vault. This moves
+        // `pool_sol_balance`, which is the TRACKED figure — the PDA's actual lamports
+        // can be higher, because anyone may transfer SOL to a System-owned PDA and
+        // nothing here rejects it. If that untracked excess is non-zero but below the
+        // rent-exempt minimum, the transfer leaves a dust remainder and the System
+        // program rejects it — so ~1 lamport sent to this PDA blocks every flush.
+        //
+        // The guard does not prevent that (the amount moved is fixed by accounting);
+        // it converts an opaque runtime failure into a named, diagnosable error.
+        // REMEDY, and it is cheap: anyone can unblock flush by sending the PDA enough
+        // SOL to lift the untracked excess to the rent-exempt minimum (~0.0009 SOL).
+        // Documented in SECURITY.md / LAUNCH_PHASES.md rather than fixed in code,
+        // because draining the full lamport balance instead would mean reworking
+        // audited flush accounting to prevent a self-healing nuisance.
+        let pool_sol_lamports = ctx.accounts.pool_sol_reserve.lamports();
+        require!(
+            reserve_payout_leaves_valid_balance(
+                pool_sol_lamports,
+                sol_to_deposit,
+                Rent::get()?.minimum_balance(0)
+            ),
+            TobeError::ReserveDustRemainder
+        );
         let pool_sol_seeds: &[&[u8]] = &[b"pool_sol_reserve", &[ctx.bumps.pool_sol_reserve]];
         anchor_lang::system_program::transfer(
             CpiContext::new_with_signer(
@@ -1933,12 +1993,15 @@ pub enum TobeError {
     FloorAlreadyActive,
     #[msg("TOBE market price is below $1; cannot arm the floor yet")]
     PriceBelowPeg,
+    #[msg("Payout would leave the SOL reserve below rent-exemption without draining it; sell a slightly different amount, or the exact remaining balance")]
+    ReserveDustRemainder,
 }
 
 #[cfg(test)]
 mod pyth_math_tests {
     use super::{
-        founder_cut_on_new_depletion, lamports_to_tobe_at_one_usd, tobe_at_or_above_one_usd,
+        founder_cut_on_new_depletion, lamports_to_tobe_at_one_usd,
+        reserve_payout_leaves_valid_balance, tobe_at_or_above_one_usd,
         tobe_to_lamports_at_one_usd, vault_withdrawal_within_floor,
     };
 
@@ -2089,6 +2152,50 @@ mod pyth_math_tests {
     // ── founder cut on NEW net depletion (H2 fix, Round 6) ──
     // never_withdrawn = total_minted/2. Depletion = never_withdrawn - vault_balance.
     // The founder is paid only on ground beyond the high-water mark.
+
+    // ── reserve payout rent rule (L2/L3 fix, Round 7) ──
+    // The SOL reserves are System-owned PDAs with no data: a payout must leave them
+    // rent-exempt or at exactly zero. RENT is the mainnet minimum_balance(0).
+
+    const RENT: u64 = 890_880;
+
+    #[test]
+    fn reserve_payout_allows_an_exact_drain() {
+        // The whole reserve stays usable — the account simply closes, and the next
+        // mint's 5 SOL transfer recreates it. This is the case the fix exists to allow.
+        assert!(reserve_payout_leaves_valid_balance(1_000_000_000, 1_000_000_000, RENT));
+        assert!(reserve_payout_leaves_valid_balance(RENT, RENT, RENT));
+        assert!(reserve_payout_leaves_valid_balance(1, 1, RENT));
+    }
+
+    #[test]
+    fn reserve_payout_allows_a_rent_exempt_remainder() {
+        // Anything at or above the minimum is fine, including landing exactly on it.
+        assert!(reserve_payout_leaves_valid_balance(1_000_000_000, 999_109_120, RENT)); // leaves RENT
+        assert!(reserve_payout_leaves_valid_balance(1_000_000_000, 500_000_000, RENT));
+    }
+
+    #[test]
+    fn reserve_payout_rejects_a_dust_remainder() {
+        // THE BUG. `sol_out <= lamports` passes, then the System program rejects the
+        // transfer for leaving a non-zero sub-rent-exempt balance. Caught here instead,
+        // with a named error.
+        assert!(!reserve_payout_leaves_valid_balance(1_000_000_000, 999_999_999, RENT)); // leaves 1
+        assert!(!reserve_payout_leaves_valid_balance(1_000_000_000, 999_109_121, RENT)); // leaves RENT-1
+        assert!(!reserve_payout_leaves_valid_balance(RENT, 1, RENT)); // leaves RENT-1
+        // Boundary: leaving exactly RENT is VALID, one lamport less is not.
+        assert!(reserve_payout_leaves_valid_balance(RENT + 1, 1, RENT));
+        assert!(!reserve_payout_leaves_valid_balance(RENT + 1, 2, RENT));
+    }
+
+    #[test]
+    fn reserve_payout_rejects_more_than_the_balance() {
+        // Underflow is reported separately as VaultSolInsufficient, but the helper must
+        // never wrap into a "valid" answer.
+        assert!(!reserve_payout_leaves_valid_balance(100, 101, RENT));
+        assert!(!reserve_payout_leaves_valid_balance(0, 1, RENT));
+        assert!(reserve_payout_leaves_valid_balance(0, 0, RENT), "zero-out of zero is a no-op drain");
+    }
 
     #[test]
     fn founder_earns_the_full_half_on_a_fresh_vault() {
