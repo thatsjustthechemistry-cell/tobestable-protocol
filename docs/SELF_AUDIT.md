@@ -365,13 +365,22 @@ declined — the 50/50 split is disclosed and retained.
 > purpose it was held for. **F1 is therefore now UNBOUNDED on this path: the founder can
 > acquire the ENTIRE vault at an effective 50% off, not merely 70% of it.**
 >
-> Accepted knowingly, alongside two further consequences: the **$1 ceiling is now
-> exhaustible** (an empty vault has no TOBE left to sell at $1, permanently), and
-> **`flush_lp_to_raydium` can be starved** — it pairs `pool_sol_reserve` SOL with vault
-> TOBE, nothing else consumes that reserve, so SOL accumulated after the vault falls
-> below flush's own floor is stranded with no instruction able to release it.
+> Accepted knowingly, alongside one further consequence: **`flush_lp_to_raydium` can be
+> starved.** It pairs `pool_sol_reserve` SOL with vault TOBE, nothing else consumes that
+> reserve, so SOL accumulated after the vault falls below flush's own floor is stranded
+> with no instruction able to release it. Previously the buy floor (30% of the *growing*
+> `total_minted / 2`) sat well above flush's floor (30% of the *early*
+> `vault_tobe_at_config` snapshot) and shielded flush as a side effect. That shield is
+> gone. `flush_lp_to_raydium` **keeps** its own floor — load-bearing there, not a policy
+> choice.
 >
-> `flush_lp_to_raydium` **keeps** its floor — load-bearing there, not a policy choice.
+> ✅ **NOT a consequence — a claim first written here and then corrected.** An earlier
+> version of this note listed "the $1 ceiling is now exhaustible" as a cost. That was
+> **wrong**. The ceiling was *always* exhaustible — it works only while the vault holds
+> TOBE to sell, floor or no floor. The floor made it exhaust **earlier**, at 70%
+> depletion, reserving a final 30% that could never be spent on the very thing it was
+> held for. **Removing the floor extends ceiling capacity from ~188M to the full ~268.7M
+> TOBE.** On this axis the change is an improvement, not a cost.
 
 What the **F2 price gate** additionally removes is the *value-destroying* half of
 this: the founder can no longer do it while TOBE trades below $1, which was the

@@ -544,12 +544,19 @@ pub mod neco_token {
         //    so as the buyer their net cost is half — they can acquire the ENTIRE
         //    vault at an effective 50% off, not merely 70% of it. (A `buyer !=
         //    founder` check does not help; it is bypassable with a second wallet.)
-        //  * The $1 ceiling is now EXHAUSTIBLE. Once the vault is empty there is no
-        //    TOBE left to sell at $1 and the ceiling stops working permanently.
         //  * `flush_lp_to_raydium` can be starved. It pairs `pool_sol_reserve` SOL
         //    with vault TOBE, and nothing else consumes that reserve — so if this
         //    path drains the vault below flush's own (retained) floor, future
         //    accumulation there is stranded with no instruction able to release it.
+        //    Previously the buy floor (30% of the GROWING total_minted/2) sat well
+        //    above flush's floor (30% of the EARLY vault_tobe_at_config snapshot),
+        //    so it shielded flush as a side effect. That shield is gone.
+        //
+        // NOT a consequence: "the ceiling becomes exhaustible". It always was — the
+        // ceiling works only while the vault holds TOBE to sell. The floor made it
+        // exhaust EARLIER (at 70% depletion, with the last 30% reserved and unusable
+        // for the very purpose it was held for). Removing it EXTENDS ceiling capacity
+        // from ~188M to the full ~268.7M TOBE.
         //
         // H2 is NOT reopened by this: the founder cut is paid only on new net vault
         // depletion, so round trips still earn nothing regardless of any floor.
