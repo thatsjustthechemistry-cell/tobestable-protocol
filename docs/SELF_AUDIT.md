@@ -22,11 +22,46 @@ That is **~201 added lines** in the core program, including two paths that move 
 
 **What has been done on that delta instead (weaker assurance — do not read as an audit):**
 - **Round 5 (2026-07-18)** — a focused adversarial pass over the delta. It found **one Medium** (`F1`: founder self-dealing via `buy_from_vault`, unbounded by any vault floor) and **one Low** (`F2`: no price gate on `buy_from_vault`). See "Round 5" below. An earlier, shallower pass the same day reported "no exploitable defect" — that was **wrong**, and is corrected here: it only looked for missing constraints, and F1 is an economic/design flaw with every constraint correctly in place.
-- **Round 6 (2026-07-26)** — covered `1a68251` (the monotonic floor baseline), which landed *after* Round 5 and is a change to the F1 mitigation itself. Found **one High (`H2`), which is OPEN** — see the notice immediately below.
+- **Round 6 (2026-07-26)** — covered `1a68251` (the monotonic floor baseline), which landed *after* Round 5 and is a change to the F1 mitigation itself. Found **one High (`H2`)**: a `buy_from_vault` → `sell_to_vault` round trip drained `vault_sol_reserve` without limit. **Now bounded** by a cumulative founder-revenue cap (2% of mint revenue) — see the notice immediately below. `L1` (Low) remains open.
 - The `arm_floor` peg-boundary math has Rust unit tests running in CI (`pyth_math_tests::arm_gate_*`).
 - The mocha integration suite now **passes 35/35** and is a required CI check (it had never been executed at all before 2026-07-18). As of 2026-07-19 it covers **every instruction**, including this delta: CI clones mainnet Raydium + the Pyth receiver + Wormhole into the local validator, creates a real TOBE/wSOL pool, and exercises `set_pool_config`, the `buy_from_vault` price gate (F2) and the `arm_floor` authority gate (H1). ⚠️ Coverage is not correctness: these assert the gates *fire*, not that the economic design is sound. Green CI is still not an audit.
 
-## 🔴 OPEN HIGH FINDING — H2 (Round 6, 2026-07-26)
+## ✅ H2 (Round 6) — BOUNDED BY A CUMULATIVE FOUNDER-REVENUE CAP
+
+**Fixed 2026-07-26.** Cumulative `founder_cut` is now capped at
+`FOUNDER_CUT_CAP_BPS` = **200 bps (2%) of cumulative mint revenue** (paid rounds ×
+`MINT_COST`, excluding free team mints). Since the protocol's loss per round-trip cycle
+is exactly `founder_cut`, capping the cumulative cut **provably caps the total leak**.
+Past the cap `buy_from_vault` routes 100% to the DAO and the round trip becomes
+value-neutral. New state field `founder_cut_paid`; whatever the cap withholds is
+reassigned to `dao_cut`, so the buyer always pays exactly `sol_in_lamports`.
+
+Because the cap scales with mint revenue rather than being a fixed number of SOL, the
+bound is **scale-invariant**: founder revenue ≤ 2% of what minters paid in, and
+`vault_sol_reserve` exposure ≤ 4% of its own cumulative inflow (2× the cap — each cycle
+moves `founder_cut` out of the protocol and an equal amount into the DAO treasury).
+
+⚠️ **This BOUNDS H2; it does not eliminate it.** Up to the cap, the round trip remains
+profitable for the founder. Raising `FOUNDER_CUT_CAP_BPS` directly raises the maximum
+extraction. Unit-tested in CI (22 passing), including
+`h2_cumulative_extraction_cannot_exceed_the_cap`, which runs 10,000 cycles of 50 SOL
+against a fully-minted cap and asserts the bound holds and converges exactly.
+
+**Two fixes that were considered and rejected as ineffective** — recorded because both
+are intuitive and both are wrong:
+
+* **A spread on `sell_to_vault`.** The founder's effective purchase price is already
+  half face value, so the spread would have to exceed **50%** to make the round trip
+  unprofitable — i.e. a "$1 floor" paying $0.50, which is not a floor. A 1% spread cuts
+  the per-cycle profit from 50% to 49%.
+* **Timelocking / escrowing `founder_cut`.** Delaying the payout does not change the
+  protocol's net position: buy at full price, sell back at par, break even, and collect
+  the accrued cut later. Same extraction, same reserve drain, later settlement. (It does
+  address same-transaction *capital efficiency*, which is not what H2 depends on.)
+
+The original finding follows, unedited.
+
+## 🔴 H2 AS FOUND — Round 6, 2026-07-26 (now bounded, see above)
 
 **`buy_from_vault` → `sell_to_vault` is a profitable round trip for the founder that
 drains `vault_sol_reserve` without limit.** The 30% vault floor does not stop it: the
@@ -416,7 +451,7 @@ the blind spot Round 5 documented.
 
 | # | Severity | Finding | Status |
 |---|----------|---------|--------|
-| H2 | **High** | `buy_from_vault` → `sell_to_vault` round trip drains `vault_sol_reserve`, unbounded and repeatable; the 30% TOBE floor never binds | 🔴 **Open** — see below |
+| H2 | **High** | `buy_from_vault` → `sell_to_vault` round trip drains `vault_sol_reserve`, unbounded and repeatable; the 30% TOBE floor never binds | ✅ **Bounded** — cumulative founder-revenue cap (2% of mint revenue) |
 | L1 | Low | Net selling raises `vault_balance` without raising `total_minted`, so the floor protects less than 30% of the *actual* balance | 🔴 Open |
 
 ### H2 — Round-trip drain of `vault_sol_reserve` (High)
@@ -457,17 +492,13 @@ and paid for. H2 is a different shape: the founder **returns** the TOBE, extract
 **SOL** instead, the 70% bound is bypassed rather than approached, and the extraction is
 **unbounded**. Accepting F1 as documented is not acceptance of H2.
 
-**Fix options** (no change applied — this is a founder decision):
+**Fix options as originally filed.** Options 1 and 2 were **wrong** — the analysis in
+"H2 bounded" above supersedes them. Option 3 is what shipped.
 
-1. **Accrue `founder_cut` to a PDA** rather than transferring it in-transaction. Removes
-   the round-trip profit at its root. This is the fee-*model* change already reviewed and
-   declined for F1; it is recorded here because it also closes H2.
-2. **Spread on `sell_to_vault`** (pay out slightly under par) so any round trip is
-   lossy. Small cost to honest sellers; no fee-model change.
-3. **Cumulative bound** tying total `founder_cut` paid out to reserve size.
-4. **Accept and disclose** — viable, but then the audit residual above and the
-   "bounded by honest reserves" framing in the launch copy must both be corrected,
-   because neither is accurate while H2 is open.
+1. ~~Accrue `founder_cut` to a PDA~~ — does not fix H2, only defers the extraction.
+2. ~~Spread on `sell_to_vault`~~ — would need to exceed 50% to work.
+3. **Cumulative bound on `founder_cut`** — ✅ **shipped** (`FOUNDER_CUT_CAP_BPS`).
+4. Accept and disclose.
 
 Note that a floor on `vault_sol_reserve` is *not* a fix: paying that reserve out at $1
 is exactly what the floor feature does, so flooring it would disable the feature.

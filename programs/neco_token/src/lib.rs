@@ -30,6 +30,43 @@ const MAX_ROUNDS: u64 = 1024;
 // changed after initialize. Free mints are tagged in program logs and disclosed
 // on the site (FAQ + live feed "team" tag).
 const TEAM_FREE_MINT_CAP: u64 = 8;
+
+// ─── Founder revenue cap (H2 fix, audit Round 6) ───
+//
+// `buy_from_vault` splits proceeds 50/50 DAO/founder. Round 6 found that this
+// makes a round trip profitable for the founder and unbounded:
+//
+//   buy_from_vault(X)       founder pays X, receives X/2 back as founder_cut
+//   sell_to_vault(tobe_out) founder receives X at par from vault_sol_reserve
+//   net                     founder +X/2, vault_sol_reserve -X, vault_balance
+//                           RESTORED — so the 30% TOBE floor is never reached
+//
+// The 30% floor bounds TOBE leaving the vault; it cannot bound this, because the
+// TOBE comes back. A spread on `sell_to_vault` cannot fix it either: the founder's
+// effective purchase price is already half face value, so the spread would have to
+// exceed 50% — i.e. a "$1 floor" paying $0.50, which is not a floor. Delaying
+// `founder_cut` does not fix it either; it only defers the same extraction.
+//
+// What IS true is that the protocol's per-cycle loss to the founder is exactly
+// `founder_cut`. So capping cumulative `founder_cut` caps the total leak, provably.
+//
+// The cap scales with cumulative MINT revenue (paid rounds x MINT_COST) rather than
+// being a fixed number of SOL, so the bound is scale-invariant: a fixed cap would be
+// a large fraction of the small early reserve and a trivial one later. At 200 bps:
+//
+//   founder revenue      <= 2% of what minters paid in
+//   vault_sol_reserve exposure <= 4% of its own cumulative inflow
+//
+// (Reserve exposure is 2x the cap: each cycle moves `founder_cut` out of the protocol
+// and an equal amount into the DAO treasury, both drawn from the reserve.)
+//
+// Free team mints do NOT raise the cap — they contribute no SOL, so they are excluded
+// from `paid_rounds`.
+//
+// ⚠️ This BOUNDS H2; it does not eliminate it. Up to the cap, the round trip is still
+// profitable. Raising this constant directly raises the maximum extraction.
+const FOUNDER_CUT_CAP_BPS: u128 = 200; // 2% of cumulative mint revenue
+
 const TOKENS_PER_UNIT: u64 = 1024;
 const TOBE_DECIMALS_FACTOR: u64 = 1_000_000_000; // 9 decimals
 const LP_LOCK_DURATION: i64 = 2 * 365 * 24 * 60 * 60; // 2 years in seconds
@@ -144,6 +181,37 @@ const VAULT_FLOOR_BPS: u128 = 3000; // 30%
 ///   nothing ever been withdrawn) is the only one that gives a true cumulative
 ///   bound: `total_minted` never decreases, so no sequence of withdrawals can
 ///   lower the floor.
+/// How much of `sol_in_lamports`'s nominal 50% founder share may actually be paid,
+/// given the cumulative cap (H2 fix — see `FOUNDER_CUT_CAP_BPS`).
+///
+/// Returns the payable amount, which is `min(nominal, remaining_headroom)` and 0 once
+/// the cap is exhausted. The shortfall is NOT lost: the caller assigns it to
+/// `dao_cut`, so the buyer always pays exactly `sol_in_lamports` and the split always
+/// sums to it. Once the cap is reached `buy_from_vault` pays 100% to the DAO, and the
+/// round trip becomes value-neutral rather than profitable.
+///
+/// `paid_rounds` must EXCLUDE free team mints — they inject no SOL, so letting them
+/// raise the cap would grant headroom that no minter funded.
+fn payable_founder_cut(
+    sol_in_lamports: u64,
+    paid_rounds: u64,
+    founder_cut_paid: u64,
+) -> Result<u64> {
+    let nominal = (sol_in_lamports / 2) as u128;
+    let mint_revenue = (paid_rounds as u128)
+        .checked_mul(MINT_COST as u128)
+        .ok_or(TobeError::MathOverflow)?;
+    let cap = mint_revenue
+        .checked_mul(FOUNDER_CUT_CAP_BPS)
+        .and_then(|v| v.checked_div(10_000))
+        .ok_or(TobeError::MathOverflow)?;
+    // saturating: `founder_cut_paid` can never exceed `cap` by construction (it is
+    // only ever incremented by the value this function returns), but a state that
+    // somehow exceeded it must yield 0 rather than wrap into a huge allowance.
+    let remaining = cap.saturating_sub(founder_cut_paid as u128);
+    Ok(core::cmp::min(nominal, remaining) as u64)
+}
+
 fn vault_withdrawal_within_floor(
     vault_balance: u64,
     floor_baseline: u64,
@@ -181,6 +249,7 @@ pub mod neco_token {
         // first TEAM_FREE_MINT_CAP mints from this wallet are payment-free.
         mint_state.team_wallet = team_wallet;
         mint_state.team_free_mints_used = 0;
+        mint_state.founder_cut_paid = 0;
         mint_state.current_round = 0;
         mint_state.tobe_mint = ctx.accounts.tobe_mint.key();
         mint_state.vault_balance = 0;
@@ -489,9 +558,19 @@ pub mod neco_token {
             TobeError::VaultFloorBreach
         );
 
-        // 1. Split proceeds 50/50: DAO treasury + founder. Integer split gives
-        //    any odd lamport to the DAO (dao_cut = total - founder_cut).
-        let founder_cut = sol_in_lamports / 2;
+        // 1. Split proceeds 50/50: DAO treasury + founder — subject to the cumulative
+        //    founder cap (H2 fix, see FOUNDER_CUT_CAP_BPS). Whatever the cap withholds
+        //    goes to the DAO instead, so the buyer always pays exactly
+        //    `sol_in_lamports` and dao_cut + founder_cut always equals it. The integer
+        //    split still gives any odd lamport to the DAO.
+        //
+        //    Free team mints are excluded from `paid_rounds`: they inject no SOL, so
+        //    they must not create founder headroom no minter funded.
+        let paid_rounds = mint_state
+            .current_round
+            .saturating_sub(mint_state.team_free_mints_used);
+        let founder_cut =
+            payable_founder_cut(sol_in_lamports, paid_rounds, mint_state.founder_cut_paid)?;
         let dao_cut = sol_in_lamports
             .checked_sub(founder_cut)
             .ok_or(TobeError::MathOverflow)?;
@@ -505,16 +584,25 @@ pub mod neco_token {
             ),
             dao_cut,
         )?;
-        anchor_lang::system_program::transfer(
-            CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                anchor_lang::system_program::Transfer {
-                    from: ctx.accounts.buyer.to_account_info(),
-                    to: ctx.accounts.founder.to_account_info(),
-                },
-            ),
-            founder_cut,
-        )?;
+        // Skipped entirely once the cap is exhausted — a 0-lamport transfer is a
+        // pointless CPI. The `founder` account stays REQUIRED on BuyFromVault either
+        // way, so this is not a wire-format change.
+        if founder_cut > 0 {
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: ctx.accounts.buyer.to_account_info(),
+                        to: ctx.accounts.founder.to_account_info(),
+                    },
+                ),
+                founder_cut,
+            )?;
+            mint_state.founder_cut_paid = mint_state
+                .founder_cut_paid
+                .checked_add(founder_cut)
+                .ok_or(TobeError::MathOverflow)?;
+        }
 
         // 2. Vault TOBE → buyer (vault PDA signs).
         let seeds = &[b"vault_authority".as_ref(), &[mint_state.vault_bump]];
@@ -541,8 +629,9 @@ pub mod neco_token {
             .ok_or(TobeError::MathOverflow)?;
 
         msg!(
-            "buy_from_vault: {} lamports ({} DAO + {} founder) → {} TOBE @ $1 (SOL/USD={}e{})",
-            sol_in_lamports, dao_cut, founder_cut, tobe_out, price, exponent
+            "buy_from_vault: {} lamports ({} DAO + {} founder) → {} TOBE @ $1 (SOL/USD={}e{}); founder_cut_paid={} (cap {} bps of {} paid-round revenue)",
+            sol_in_lamports, dao_cut, founder_cut, tobe_out, price, exponent,
+            mint_state.founder_cut_paid, FOUNDER_CUT_CAP_BPS, paid_rounds
         );
         Ok(())
     }
@@ -1731,6 +1820,13 @@ pub struct MintState {
     pub team_free_mints_used: u64,         // 8  — free team mints consumed (cap: TEAM_FREE_MINT_CAP);
                                            //      appended fields — run migrate_state_v2 after upgrade
                                            //      to realloc + zero-init on existing deployments
+
+    // ─── Round 6: founder revenue cap (H2 fix) ───
+    pub founder_cut_paid: u64,             // 8  — cumulative lamports paid to `founder` by
+                                           //      buy_from_vault. Bounded by FOUNDER_CUT_CAP_BPS
+                                           //      of cumulative mint revenue; once exhausted,
+                                           //      buy_from_vault pays 100% to the DAO. This is
+                                           //      what bounds H2 (round-trip reserve drain).
 }
 
 // ─── Errors ───
@@ -1807,8 +1903,8 @@ pub enum TobeError {
 #[cfg(test)]
 mod pyth_math_tests {
     use super::{
-        lamports_to_tobe_at_one_usd, tobe_at_or_above_one_usd, tobe_to_lamports_at_one_usd,
-        vault_withdrawal_within_floor,
+        lamports_to_tobe_at_one_usd, payable_founder_cut, tobe_at_or_above_one_usd,
+        tobe_to_lamports_at_one_usd, vault_withdrawal_within_floor, FOUNDER_CUT_CAP_BPS, MINT_COST,
     };
 
     #[test]
@@ -1954,5 +2050,90 @@ mod pyth_math_tests {
         // `total_minted / 2`, which is non-zero the moment anyone has minted. (It
         // still requires pool config, but for the F2 price gate, not for this.)
         assert!(vault_withdrawal_within_floor(1000, 0, 1000).unwrap());
+    }
+
+    // ── founder revenue cap (H2 fix, Round 6) ──
+    // Cap = FOUNDER_CUT_CAP_BPS (200 = 2%) of paid_rounds * MINT_COST.
+    // 1 paid round => 10 SOL revenue => cap = 0.2 SOL = 200_000_000 lamports.
+
+    #[test]
+    fn founder_cut_is_the_full_half_while_under_the_cap() {
+        // 100 paid rounds => 1000 SOL revenue => cap 20 SOL. A 1 SOL buy's nominal
+        // half (0.5 SOL) is far below that, so it pays in full.
+        let cut = payable_founder_cut(1_000_000_000, 100, 0).unwrap();
+        assert_eq!(cut, 500_000_000);
+    }
+
+    #[test]
+    fn founder_cut_is_clamped_to_the_remaining_headroom() {
+        // 1 paid round => cap 200_000_000. Already paid 150_000_000, so only
+        // 50_000_000 remains even though the nominal half is 500_000_000.
+        let cut = payable_founder_cut(1_000_000_000, 1, 150_000_000).unwrap();
+        assert_eq!(cut, 50_000_000);
+    }
+
+    #[test]
+    fn founder_cut_is_zero_once_the_cap_is_exhausted() {
+        // At the cap exactly, and past it, the payable cut is 0 — buy_from_vault then
+        // routes 100% to the DAO and the H2 round trip becomes value-neutral.
+        assert_eq!(payable_founder_cut(1_000_000_000, 1, 200_000_000).unwrap(), 0);
+        assert_eq!(payable_founder_cut(1_000_000_000, 1, 999_999_999).unwrap(), 0);
+    }
+
+    #[test]
+    fn free_team_mints_do_not_raise_the_founder_cap() {
+        // paid_rounds excludes free mints because they inject no SOL. Zero paid
+        // rounds => zero revenue => zero cap, however large the buy.
+        assert_eq!(payable_founder_cut(u64::MAX, 0, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn founder_cap_scales_with_paid_rounds() {
+        // Scale-invariance is the point of a bps-of-revenue cap rather than a fixed
+        // number of SOL: the bound stays a constant fraction at every stage.
+        for &rounds in &[1u64, 100, 512, 1024] {
+            let cap = (rounds as u128 * MINT_COST as u128 * FOUNDER_CUT_CAP_BPS / 10_000) as u64;
+            // Paying exactly the cap is allowed...
+            assert_eq!(payable_founder_cut(cap * 2, rounds, 0).unwrap(), cap);
+            // ...and nothing more, ever.
+            assert_eq!(payable_founder_cut(cap * 2, rounds, cap).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn h2_cumulative_extraction_cannot_exceed_the_cap() {
+        // THE H2 BOUND. Simulate the round-trip attack: the founder cycles X through
+        // buy_from_vault -> sell_to_vault repeatedly. vault_balance is restored each
+        // cycle so the 30% TOBE floor never fires; the only thing standing between the
+        // founder and the whole reserve is this cap. Assert it holds no matter how
+        // many cycles are run.
+        let paid_rounds = 1024u64; // fully minted — the largest cap possible
+        let cap = (paid_rounds as u128 * MINT_COST as u128 * FOUNDER_CUT_CAP_BPS / 10_000) as u64;
+        let mut paid = 0u64;
+        // 10_000 cycles of 50 SOL each = 500_000 SOL nominal, vastly over the cap.
+        for _ in 0..10_000 {
+            let cut = payable_founder_cut(50_000_000_000, paid_rounds, paid).unwrap();
+            paid = paid.checked_add(cut).expect("cumulative must not overflow");
+            assert!(paid <= cap, "cumulative founder_cut breached the cap");
+        }
+        assert_eq!(paid, cap, "should converge to exactly the cap, not below it");
+    }
+
+    #[test]
+    fn founder_split_always_sums_to_the_amount_paid() {
+        // The cap must never create or destroy lamports: whatever it withholds from
+        // the founder goes to the DAO, so the buyer's payment is fully accounted for
+        // both under the cap and past it.
+        for &(sol_in, rounds, already) in &[
+            (1_000_000_000u64, 100u64, 0u64),          // under cap
+            (1_000_000_000, 1, 150_000_000),           // partially clamped
+            (1_000_000_000, 1, 200_000_000),           // fully clamped
+            (3, 100, 0),                               // odd lamport
+        ] {
+            let cut = payable_founder_cut(sol_in, rounds, already).unwrap();
+            let dao = sol_in.checked_sub(cut).unwrap();
+            assert_eq!(cut + dao, sol_in);
+            assert!(cut <= sol_in / 2, "cut must never exceed the nominal half");
+        }
     }
 }
