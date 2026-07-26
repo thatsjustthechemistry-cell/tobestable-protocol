@@ -22,8 +22,27 @@ That is **~201 added lines** in the core program, including two paths that move 
 
 **What has been done on that delta instead (weaker assurance — do not read as an audit):**
 - **Round 5 (2026-07-18)** — a focused adversarial pass over the delta. It found **one Medium** (`F1`: founder self-dealing via `buy_from_vault`, unbounded by any vault floor) and **one Low** (`F2`: no price gate on `buy_from_vault`). See "Round 5" below. An earlier, shallower pass the same day reported "no exploitable defect" — that was **wrong**, and is corrected here: it only looked for missing constraints, and F1 is an economic/design flaw with every constraint correctly in place.
+- **Round 6 (2026-07-26)** — covered `1a68251` (the monotonic floor baseline), which landed *after* Round 5 and is a change to the F1 mitigation itself. Found **one High (`H2`), which is OPEN** — see the notice immediately below.
 - The `arm_floor` peg-boundary math has Rust unit tests running in CI (`pyth_math_tests::arm_gate_*`).
 - The mocha integration suite now **passes 35/35** and is a required CI check (it had never been executed at all before 2026-07-18). As of 2026-07-19 it covers **every instruction**, including this delta: CI clones mainnet Raydium + the Pyth receiver + Wormhole into the local validator, creates a real TOBE/wSOL pool, and exercises `set_pool_config`, the `buy_from_vault` price gate (F2) and the `arm_floor` authority gate (H1). ⚠️ Coverage is not correctness: these assert the gates *fire*, not that the economic design is sound. Green CI is still not an audit.
+
+## 🔴 OPEN HIGH FINDING — H2 (Round 6, 2026-07-26)
+
+**`buy_from_vault` → `sell_to_vault` is a profitable round trip for the founder that
+drains `vault_sol_reserve` without limit.** The 30% vault floor does not stop it: the
+round trip returns the TOBE, so `vault_balance` is restored and the floor is never
+reached, while the reserve — which has no floor of its own — loses the full cycle
+amount. Net +50% of the cycled SOL to the founder, repeatable until the reserve is
+empty, after which the $1 floor stops working for everyone.
+
+Requires only the ordinary post-launch state (`floor_active` armed at Step 11, TOBE ≥ $1)
+and one cycle's worth of working capital. Exploitable **only** by the holder of
+`mint_state.founder`; value-neutral for anyone else.
+
+**This is not the disclosed F1 residual.** F1 is a bounded discount on TOBE the founder
+*keeps and pays for*. H2 extracts SOL, bypasses the 70% bound rather than approaching it,
+and is unbounded. **Status: open, no fix applied.** Full analysis, worked example and fix
+options in [Round 6](#round-6-opus-5-adversarial-pass-on-the-post-round-5-delta-2026-07-26).
 
 **Recommendation before mainnet:** get a **focused paid review of this delta**. Two independent reasons, both from this codebase's own history: Round 1 *rejected* the M1 `seed_pool` finding as a non-issue and Round 4 found it was real; and on 2026-07-18 a shallow pass cleared `buy_from_vault` before a deeper pass the same day found **F1** (Medium). Self-administered passes here have now missed a genuine issue **twice**.
 
@@ -271,11 +290,19 @@ Unit-tested in CI: `vault_floor_monotonic_baseline_cannot_be_ratcheted_down` pin
 the ratchet failure, `vault_floor_rises_as_minting_continues` pins the 30% share
 across scales (15 tests passing).
 
-**Residual — F1 is still mitigated, not closed.** The floor now genuinely bounds
-extraction at 70% of the vault, but it does not remove the discount: the founder
-can still acquire that 70% at an effective 50% off. Closing it fully requires a
-change to the fee *model* (timelocked or DAO-held `founder_cut`), which the
-founder has reviewed and declined — the 50/50 split is disclosed and retained.
+**Residual — F1 is still mitigated, not closed.** The floor bounds how much TOBE can
+leave the vault at 70%, and it does not remove the discount: the founder can acquire
+that 70% at an effective 50% off. Closing it fully requires a change to the fee
+*model* (timelocked or DAO-held `founder_cut`), which the founder has reviewed and
+declined — the 50/50 split is disclosed and retained.
+
+> 🔴 **SUPERSEDED IN PART BY ROUND 6 (H2) — do not read the sentence above as a bound
+> on total extraction.** An earlier version of this paragraph claimed the floor
+> "genuinely bounds extraction at 70% of the vault". That is true of **TOBE** and false
+> of the **protocol**: Round 6 found that a `buy_from_vault` → `sell_to_vault` round
+> trip returns the TOBE to the vault, so `vault_balance` is restored and this floor
+> never binds, while `vault_sol_reserve` is drained by the full cycle amount — with no
+> floor of its own and no limit on repetition. See [Round 6](#round-6-opus-5-adversarial-pass-on-the-post-round-5-delta-2026-07-26).
 
 What the **F2 price gate** additionally removes is the *value-destroying* half of
 this: the founder can no longer do it while TOBE trades below $1, which was the
@@ -355,7 +382,12 @@ an effective $0.50.
 
 ### Checked and clean this round
 
-`sell_to_vault` (no founder cut, no symmetric issue) · team free-mint path (signer-gated
+~~`sell_to_vault` (no founder cut, no symmetric issue)~~ — 🔴 **this clearance was
+wrong, see Round 6 / H2.** `sell_to_vault` is clean *in isolation*, which is what was
+checked. Paired with `buy_from_vault` it completes a profitable round trip that drains
+`vault_sol_reserve`. This entry is left in place rather than deleted: this round wrote
+down "compound vulnerabilities are a blind spot of checklist-style review" and then, on
+the same page, cleared an instruction by examining it alone. · team free-mint path (signer-gated
 via `minter: Signer`, `checked_add`, hard cap, tokens can't be redirected —
 `minter_tobe.owner == minter.key()`) · referral (instruction data only, no amount effect,
 self-referral rejected) · split arithmetic (exact; odd lamport to the DAO) · destination
@@ -370,3 +402,100 @@ This round was again AI-assisted and self-administered. It found a Medium that a
 pass in the same session missed, which is itself evidence about the method's variance. A
 **focused paid review of this delta** remains recommended — F1 is exactly the class of
 issue (economic, not syntactic) where an independent professional reviewer earns their fee.
+
+---
+
+## Round 6: Opus 5 adversarial pass on the post-Round-5 delta (2026-07-26)
+
+**Scope.** Commit `1a68251` (the monotonic floor baseline), which landed *after* the
+Round 5 fix commit `04556a2` and had therefore never been audited — it is a change to
+the F1 mitigation itself. Plus `buy_from_vault` reviewed as a whole, since it was
+modified three times on 2026-07-18 (F1 floor → F2 price gate → monotonic anchor) and
+never reviewed as a combined unit. Aimed deliberately at **compound** vulnerabilities,
+the blind spot Round 5 documented.
+
+| # | Severity | Finding | Status |
+|---|----------|---------|--------|
+| H2 | **High** | `buy_from_vault` → `sell_to_vault` round trip drains `vault_sol_reserve`, unbounded and repeatable; the 30% TOBE floor never binds | 🔴 **Open** — see below |
+| L1 | Low | Net selling raises `vault_balance` without raising `total_minted`, so the floor protects less than 30% of the *actual* balance | 🔴 Open |
+
+### H2 — Round-trip drain of `vault_sol_reserve` (High)
+
+The monotonic floor bounds **TOBE leaving the vault**. Nothing bounds **SOL leaving the
+reserve**, and a round trip puts the TOBE back — so the floor is never reached.
+
+**Preconditions:** `floor_active == true` (Step 11, council-armed 2-of-3) and TOBE ≥ $1.
+Both are ordinary expected states, not attack conditions.
+
+| Step | Founder's SOL | `vault_balance` | `vault_sol_reserve` |
+|---|---|---|---|
+| `buy_from_vault(X)` | −X, then +X/2 (`founder_cut`) | −`tobe_out` | — |
+| `sell_to_vault(tobe_out)` | +X (paid out at $1) | **+`tobe_out` → restored** | **−X** |
+| **Net per cycle** | **+X/2** | **unchanged** | **−X** |
+
+Because `vault_balance` returns to its pre-cycle value, the floor check
+(`vault_withdrawal_within_floor(vault_balance, total_minted / 2, tobe_out)`) evaluates
+identically on the next iteration. **The cycle repeats without limit.** The only
+stopping condition anywhere on the path is `vault_sol_lamports >= sol_out` in
+`sell_to_vault` — `vault_sol_reserve` has **no floor of its own**.
+
+**Worked example** (SOL = $150, 500 SOL accumulated from 100 paid rounds). The founder
+cycles 10 SOL fifty times: founder **+250 SOL**, DAO treasury +250 SOL,
+`vault_sol_reserve` **0**. `sell_to_vault` then fails `VaultSolInsufficient` for every
+other holder. The reserve that backs the $1 floor is gone, and the founder needed only
+10 SOL of working capital — recovered on the first cycle.
+
+**Who can do it.** Only the holder of `mint_state.founder`. For anyone else the round
+trip is value-neutral (par in, par out) minus fees, which is precisely why this is the
+F1 incentive resurfacing through a channel the F1 fix does not cover. Round-trip
+rounding loses only dust — `tobe_out` then back to lamports is lossless to within a few
+lamports, against a profit of X/2.
+
+**Why this is not the accepted F1.** The accepted, disclosed residual is that the
+founder may **acquire and keep** up to 70% of the vault's TOBE at half price — bounded,
+and paid for. H2 is a different shape: the founder **returns** the TOBE, extracts
+**SOL** instead, the 70% bound is bypassed rather than approached, and the extraction is
+**unbounded**. Accepting F1 as documented is not acceptance of H2.
+
+**Fix options** (no change applied — this is a founder decision):
+
+1. **Accrue `founder_cut` to a PDA** rather than transferring it in-transaction. Removes
+   the round-trip profit at its root. This is the fee-*model* change already reviewed and
+   declined for F1; it is recorded here because it also closes H2.
+2. **Spread on `sell_to_vault`** (pay out slightly under par) so any round trip is
+   lossy. Small cost to honest sellers; no fee-model change.
+3. **Cumulative bound** tying total `founder_cut` paid out to reserve size.
+4. **Accept and disclose** — viable, but then the audit residual above and the
+   "bounded by honest reserves" framing in the launch copy must both be corrected,
+   because neither is accurate while H2 is open.
+
+Note that a floor on `vault_sol_reserve` is *not* a fix: paying that reserve out at $1
+is exactly what the floor feature does, so flooring it would disable the feature.
+
+### L1 — protected fraction degrades under net selling (Low)
+
+`sell_to_vault` increments `vault_balance` but not `total_minted`, so after sustained net
+selling `vault_balance` can exceed `total_minted / 2` and the floor (30% of
+`total_minted / 2`) guards a shrinking fraction of the real balance. Secondary to H2 and
+partially self-correcting, since those extra tokens were paid for out of the reserve.
+
+### Checked and found sound this round
+
+The **monotonic baseline itself is correct**: `total_minted / 2` is exact (each mint
+splits evenly and `total_tokens` is always even via the 1e9 decimals factor), genuinely
+non-decreasing, and the commit's ratchet analysis — that a current-balance anchor walks
+1000 → 300 → 90 → 27 → 0 — is right. The flush/buy baseline asymmetry is justified and
+documented at both call sites. No arithmetic, account-substitution, signer, or authority
+defect was found in `1a68251` or in `buy_from_vault` as a whole.
+
+### What this round says about the method
+
+Three of six rounds have now overturned a *specific clearance* issued by an earlier
+round: Round 4 found M1 real after Round 1 rejected it; Round 5 found F1 after a
+shallower same-day pass cleared `buy_from_vault`; Round 6 found H2 after Round 5 cleared
+`sell_to_vault`. In every case the earlier pass examined the component **in isolation**
+and the later pass examined it **in combination**.
+
+That is a consistent, named failure mode of this method, and six rounds have not
+exhausted it. **The standing recommendation for a focused paid review is strengthened,
+not satisfied, by this round.**
